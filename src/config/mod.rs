@@ -4,14 +4,14 @@ use anyhow::{Context, Result};
 use schema::{LockFile, YmConfig};
 use std::path::{Path, PathBuf};
 
-pub const CONFIG_FILE: &str = "ym.json";
+pub const CONFIG_FILE: &str = "package.json";
 pub const LOCK_FILE: &str = "ym.lock";
 pub const CACHE_DIR: &str = ".ym";
 pub const OUTPUT_DIR: &str = "out";
 pub const CLASSES_DIR: &str = "classes";
 pub const SOURCE_DIR: &str = "src";
 
-/// Search upward from `start` for a ym.json file
+/// Search upward from `start` for a package.json file
 pub fn find_config(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
@@ -25,7 +25,7 @@ pub fn find_config(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Search upward for the workspace root (a ym.json with "workspaces" field)
+/// Search upward for the workspace root (a package.json with "workspaces" field)
 pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     let mut last_with_workspaces = None;
@@ -74,10 +74,10 @@ pub fn save_lock(path: &Path, lock: &LockFile) -> Result<()> {
     Ok(())
 }
 
-/// Load ym.json from the current directory or any parent
+/// Load package.json from the current directory or any parent
 pub fn load_or_find_config() -> Result<(PathBuf, YmConfig)> {
     let cwd = std::env::current_dir()?;
-    let config_path = find_config(&cwd).context("No ym.json found. Run 'ym init' to create one.")?;
+    let config_path = find_config(&cwd).context("No package.json found. Run 'ym init' to create one.")?;
     let config = load_config(&config_path)?;
     Ok((config_path, config))
 }
@@ -101,7 +101,7 @@ pub fn source_dir(project: &Path) -> PathBuf {
     }
 }
 
-/// Get the source directory respecting ym.json `sourceDir` override.
+/// Get the source directory respecting package.json `sourceDir` override.
 pub fn source_dir_for(project: &Path, cfg: &YmConfig) -> PathBuf {
     if let Some(ref custom) = cfg.source_dir {
         project.join(custom)
@@ -121,7 +121,7 @@ pub fn test_dir(project: &Path) -> PathBuf {
     }
 }
 
-/// Get the test directory respecting ym.json `testDir` override.
+/// Get the test directory respecting package.json `testDir` override.
 pub fn test_dir_for(project: &Path, cfg: &YmConfig) -> PathBuf {
     if let Some(ref custom) = cfg.test_dir {
         project.join(custom)

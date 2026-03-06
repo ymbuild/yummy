@@ -3,7 +3,7 @@ use console::style;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Execute a lifecycle script if defined in ym.json scripts.
+/// Execute a lifecycle script if defined in package.json scripts.
 ///
 /// Supported hooks:
 ///   preinit, postinit

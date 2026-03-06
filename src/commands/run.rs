@@ -163,7 +163,7 @@ pub fn resolve_main_class(
     project: &std::path::Path,
     _target: Option<&str>,
 ) -> Result<String> {
-    // 1. Check ym.json "main" field
+    // 1. Check package.json "main" field
     if let Some(ref main) = cfg.main {
         return Ok(main.clone());
     }
@@ -173,7 +173,7 @@ pub fn resolve_main_class(
     let main_classes = javac::scan_main_methods(&[src])?;
 
     match main_classes.len() {
-        0 => bail!("No main class found. Set \"main\" in ym.json or add a public static void main method."),
+        0 => bail!("No main class found. Set \"main\" in package.json or add a public static void main method."),
         1 => Ok(main_classes.into_iter().next().unwrap()),
         _ => {
             println!("  Multiple main classes found:");

@@ -25,7 +25,7 @@ pub fn execute_with_options(
 
     if let Some(tpl) = template {
         if existing.is_some() {
-            bail!("ym.json already exists, cannot use --template");
+            bail!("package.json already exists, cannot use --template");
         }
         return execute_from_template(&dir, &tpl);
     }
@@ -79,7 +79,7 @@ fn execute_defaults(dir: &Path) -> Result<()> {
 
     let main_class = config.main.as_deref().unwrap_or("Main");
     let main_path = main_class.replace('.', "/");
-    println!("  {} Created ym.json", style("✓").green());
+    println!("  {} Created package.json", style("✓").green());
     println!("  {} Created src/main/java/{}.java", style("✓").green(), main_path);
 
     Ok(())
@@ -300,7 +300,7 @@ fn execute_interactive(dir: &Path, existing: Option<&YmConfig>) -> Result<()> {
 
     let main_class = config.main.as_deref().unwrap_or("Main");
     let main_path = main_class.replace('.', "/");
-    println!("  {} Created ym.json", style("✓").green());
+    println!("  {} Created package.json", style("✓").green());
     println!("  {} Created src/main/java/{}.java", style("✓").green(), main_path);
 
     Ok(())
@@ -636,7 +636,7 @@ class {}Test {{
     Ok(())
 }
 
-/// Write ym.json + create directories/files
+/// Write package.json + create directories/files
 fn write_project(dir: &Path, config: &YmConfig) -> Result<()> {
     std::fs::create_dir_all(dir)?;
 

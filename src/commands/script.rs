@@ -3,7 +3,7 @@ use console::style;
 
 use crate::config;
 
-/// Run a named script from ym.json "scripts" section.
+/// Run a named script from package.json "scripts" section.
 /// With no arguments, lists all available scripts.
 pub fn execute(name: Option<String>) -> Result<()> {
     let (config_path, cfg) = config::load_or_find_config()?;
@@ -15,9 +15,9 @@ pub fn execute(name: Option<String>) -> Result<()> {
         None => {
             // List all scripts
             if scripts.is_empty() {
-                println!("  No scripts defined in ym.json.");
+                println!("  No scripts defined in package.json.");
                 println!();
-                println!("  Add scripts to ym.json:");
+                println!("  Add scripts to package.json:");
                 println!(
                     "    {}",
                     style(r#""scripts": { "hello": "echo Hello!" }"#).dim()
@@ -47,7 +47,7 @@ pub fn execute(name: Option<String>) -> Result<()> {
                 None => {
                     let available: Vec<&String> = scripts.keys().collect();
                     if available.is_empty() {
-                        bail!("Script '{}' not found. No scripts defined in ym.json.", name);
+                        bail!("Script '{}' not found. No scripts defined in package.json.", name);
                     } else {
                         bail!(
                             "Script '{}' not found. Available: {}",

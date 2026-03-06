@@ -7,12 +7,12 @@ use std::time::SystemTime;
 const GRAPH_CACHE_FILE: &str = "graph.json";
 
 /// Cached workspace graph for fast loading.
-/// Invalidated when any ym.json file changes.
+/// Invalidated when any package.json file changes.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GraphCache {
     /// Timestamp of cache creation
     pub created_at: u64,
-    /// Map of ym.json path -> modification time (for invalidation)
+    /// Map of package.json path -> modification time (for invalidation)
     pub config_mtimes: HashMap<String, u64>,
     /// Cached package info
     pub packages: Vec<CachedPackage>,
@@ -31,7 +31,7 @@ impl GraphCache {
         let content = std::fs::read_to_string(&path).ok()?;
         let cache: GraphCache = serde_json::from_str(&content).ok()?;
 
-        // Validate: check if any ym.json has changed
+        // Validate: check if any package.json has changed
         for (config_path, cached_mtime) in &cache.config_mtimes {
             let current_mtime = file_mtime(Path::new(config_path)).unwrap_or(0);
             if current_mtime != *cached_mtime {
@@ -74,7 +74,7 @@ impl GraphCache {
             });
         }
 
-        // Also track root ym.json
+        // Also track root package.json
         let root_config = workspace_root.join(crate::config::CONFIG_FILE);
         let root_mtime = file_mtime(&root_config).unwrap_or(0);
         config_mtimes.insert(root_config.to_string_lossy().to_string(), root_mtime);

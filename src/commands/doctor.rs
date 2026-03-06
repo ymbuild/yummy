@@ -25,7 +25,7 @@ pub fn execute(fix: bool) -> Result<()> {
     // Check git
     check_command("git", &["--version"], "Git");
 
-    // Check ym.json
+    // Check package.json
     check_config();
 
     // Check Maven cache
@@ -196,7 +196,7 @@ fn check_config() {
         match crate::config::load_config(&path) {
             Ok(cfg) => {
                 println!(
-                    "  {} ym.json  {} ({})",
+                    "  {} package.json  {} ({})",
                     style("✓").green(),
                     style(&cfg.name).dim(),
                     style(path.display()).dim()
@@ -204,7 +204,7 @@ fn check_config() {
             }
             Err(e) => {
                 println!(
-                    "  {} ym.json  {} ({})",
+                    "  {} package.json  {} ({})",
                     style("✗").red(),
                     style("parse error").red(),
                     style(e).dim()
@@ -213,7 +213,7 @@ fn check_config() {
         }
     } else {
         println!(
-            "  {} ym.json  {}",
+            "  {} package.json  {}",
             style("-").dim(),
             style("not found in current directory tree").dim()
         );

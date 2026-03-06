@@ -4,7 +4,7 @@ use console::style;
 use crate::config;
 use crate::workspace::resolver;
 
-/// Install all dependencies from ym.json.
+/// Install all dependencies from package.json.
 pub fn execute() -> Result<()> {
     let (config_path, cfg) = config::load_or_find_config()?;
     let project = config::project_dir(&config_path);

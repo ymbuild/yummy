@@ -13,7 +13,7 @@ pub fn execute(check: bool) -> Result<()> {
     regenerate_lock()
 }
 
-/// Check if lock file is up-to-date with ym.json dependencies.
+/// Check if lock file is up-to-date with package.json dependencies.
 /// Exit 1 if not — useful for CI pipelines.
 fn check_lock_freshness() -> Result<()> {
     let (config_path, cfg) = config::load_or_find_config()?;

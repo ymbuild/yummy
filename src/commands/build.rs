@@ -544,7 +544,7 @@ pub fn resolve_deps(project: &Path, cfg: &YmConfig) -> Result<Vec<PathBuf>> {
             );
         }
         eprintln!(
-            "  {} Use \"resolutions\" in ym.json to pin a specific version",
+            "  {} Use \"resolutions\" in package.json to pin a specific version",
             console::style("→").dim()
         );
     }

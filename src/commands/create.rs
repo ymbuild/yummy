@@ -39,7 +39,7 @@ pub fn execute(name: String, template: Option<String>, include_deps: bool) -> Re
     let test_java_dir = dir.join("src").join("test").join("java");
     std::fs::create_dir_all(&test_java_dir)?;
 
-    // Create ym.json
+    // Create package.json
     let java_version = cfg.target.clone().unwrap_or_else(|| "21".to_string());
 
     let mut module_config = YmConfig {

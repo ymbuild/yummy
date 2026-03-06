@@ -74,7 +74,7 @@ pub fn execute() -> Result<()> {
         println!("  {} {}", style("cwd").dim(), cwd.display());
     }
 
-    // ym.json info
+    // package.json info
     if let Ok((config_path, cfg)) = config::load_or_find_config() {
         let project = config::project_dir(&config_path);
         println!("  {} {}", style("config").dim(), config_path.display());

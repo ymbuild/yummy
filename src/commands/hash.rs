@@ -52,7 +52,7 @@ fn compute_project_hash(
 ) -> Result<String> {
     let mut hasher = Sha256::new();
 
-    // Hash ym.json contents
+    // Hash package.json contents
     let config_path = project.join(config::CONFIG_FILE);
     if config_path.exists() {
         let content = std::fs::read(&config_path)?;

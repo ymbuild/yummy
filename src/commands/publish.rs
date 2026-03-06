@@ -9,7 +9,7 @@ pub fn execute(dry_run: bool) -> Result<()> {
     let project = config::project_dir(&config_path);
 
     if cfg.private.unwrap_or(false) {
-        bail!("Cannot publish a private package. Remove \"private\": true from ym.json.");
+        bail!("Cannot publish a private package. Remove \"private\": true from package.json.");
     }
 
     let version = cfg

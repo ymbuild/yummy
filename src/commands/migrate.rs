@@ -12,7 +12,7 @@ pub fn execute() -> Result<()> {
     let config_path = cwd.join(config::CONFIG_FILE);
 
     if config_path.exists() {
-        bail!("ym.json already exists. Remove it first to re-migrate.");
+        bail!("package.json already exists. Remove it first to re-migrate.");
     }
 
     let pom = cwd.join("pom.xml");
@@ -37,7 +37,7 @@ pub fn execute() -> Result<()> {
 
     config::save_config(&config_path, &cfg)?;
 
-    println!("  {} Created ym.json", style("✓").green());
+    println!("  {} Created package.json", style("✓").green());
 
     let dep_count = cfg.dependencies.as_ref().map(|d| d.len()).unwrap_or(0);
     let dev_count = cfg.dev_dependencies.as_ref().map(|d| d.len()).unwrap_or(0);

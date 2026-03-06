@@ -19,7 +19,7 @@ pub fn execute(key: Option<String>, value: Option<String>) -> Result<()> {
                 Some(v) => println!("{}", v),
                 None => {
                     eprintln!(
-                        "  {} Key '{}' not found in ym.json",
+                        "  {} Key '{}' not found in package.json",
                         style("!").yellow(),
                         key
                     );

@@ -54,7 +54,7 @@ pub fn execute(dep: &str, from_dev: bool) -> Result<()> {
         );
     }
 
-    bail!("Dependency '{}' not found in ym.json", dep);
+    bail!("Dependency '{}' not found in package.json", dep);
 }
 
 fn remove_from_section(

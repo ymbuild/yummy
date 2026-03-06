@@ -37,7 +37,7 @@ pub fn ensure_jdk(version: &str, vendor: Option<&str>, auto_download: bool) -> R
     // 4. Auto-download if enabled
     if !auto_download {
         bail!(
-            "JDK {} not found. Install it or set jvm.autoDownload: true in ym.json",
+            "JDK {} not found. Install it or set jvm.autoDownload: true in package.json",
             version
         );
     }

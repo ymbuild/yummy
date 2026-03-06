@@ -49,7 +49,7 @@ pub fn execute(dep: &str) -> Result<()> {
                     "dependencies"
                 };
                 println!(
-                    "  └── directly declared in {} of ym.json",
+                    "  └── directly declared in {} of package.json",
                     style(label).green()
                 );
             }

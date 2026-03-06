@@ -37,7 +37,7 @@ enum YmCommands {
         #[arg(long, short = 'y')]
         yes: bool,
     },
-    /// Install all dependencies from ym.json
+    /// Install all dependencies from package.json
     Install,
     /// Add a dependency
     Add {
@@ -58,9 +58,9 @@ enum YmCommands {
         #[arg(long, short = 'D')]
         dev: bool,
     },
-    /// Convert from Maven/Gradle to ym.json (auto-detects pom.xml or build.gradle)
+    /// Convert from Maven/Gradle to package.json (auto-detects pom.xml or build.gradle)
     Convert,
-    /// Migrate from Maven/Gradle to ym.json (alias for convert)
+    /// Migrate from Maven/Gradle to package.json (alias for convert)
     #[command(hide = true)]
     Migrate,
     /// Publish to a Maven repository
@@ -153,7 +153,7 @@ enum YmCommands {
         #[arg(long)]
         outdated: bool,
     },
-    /// View or set ym.json configuration
+    /// View or set package.json configuration
     Config {
         /// Config key (e.g., "java", "compiler.engine")
         key: Option<String>,
@@ -162,7 +162,7 @@ enum YmCommands {
     },
     /// Download source JARs for all dependencies
     Sources,
-    /// Validate ym.json configuration
+    /// Validate package.json configuration
     Validate,
     /// Pin a dependency version (prevent ym upgrade from changing it)
     Pin {
@@ -202,7 +202,7 @@ enum YmCommands {
         /// Shell type (bash, zsh, fish, powershell)
         shell: Shell,
     },
-    /// Run a named script from ym.json
+    /// Run a named script from package.json
     Run {
         /// Script name
         name: String,

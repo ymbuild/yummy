@@ -21,7 +21,7 @@ pub struct WorkspaceGraph {
 }
 
 impl WorkspaceGraph {
-    /// Build the workspace graph by scanning all ym.json files
+    /// Build the workspace graph by scanning all package.json files
     pub fn build(workspace_root: &Path) -> Result<Self> {
         let root_config = config::load_config(&workspace_root.join(config::CONFIG_FILE))?;
         let patterns = root_config
@@ -34,7 +34,7 @@ impl WorkspaceGraph {
         let mut name_to_index = HashMap::new();
         let mut packages = Vec::new();
 
-        // Scan workspace patterns for ym.json files
+        // Scan workspace patterns for package.json files
         for pattern in &patterns {
             let full_pattern = workspace_root.join(pattern).join(config::CONFIG_FILE);
             let pattern_str = full_pattern.to_string_lossy().to_string();
