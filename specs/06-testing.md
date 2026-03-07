@@ -11,13 +11,17 @@ ymc test                                 # 运行所有单元测试
 ymc test --filter "UserServiceTest"      # 按类名过滤
 ymc test --integration                   # 运行集成测试（*IT.java）
 ymc test --all                           # 运行所有测试（单元 + 集成）
-ymc test --verbose                       # 显示详细输出
+ymc test -v                              # 显示详细输出
 ymc test --fail-fast                     # 首个失败即停止
+ymc test --tag fast                      # 仅运行 @Tag("fast") 的测试
+ymc test --exclude-tag slow              # 排除 @Tag("slow") 的测试
 ymc test --timeout 30                    # 每个测试超时（秒，JUnit 5 配置）
 ymc test --coverage                      # 生成 JaCoCo 覆盖率报告
 ymc test --list                          # 仅列出测试类
 ymc test --watch                         # 监听模式：文件变化自动重跑
+ymc test --keep-going                    # 工作空间：模块失败后继续测试无关模块
 ymc test <module>                        # 工作空间：测试指定模块
+ymc test                                 # 工作空间（无 target）：测试所有模块
 ```
 
 ## 测试分类
@@ -59,29 +63,33 @@ ymc test --exclude-tag slow              # 排除 @Tag("slow")
 ### 单项目模式
 
 1. 编译主源码（`src/main/java` → `out/classes`）
-2. 编译测试源码（`src/test/java` → `out/classes`，classpath 含主源码 + 所有依赖）
+2. 编译测试源码（`src/test/java` → `out/test-classes`，classpath 含 out/classes + compile + provided + test scope 依赖）
 3. 发现测试类（按命名约定扫描 `.java` 文件中的 `@Test` 或 `@org.junit` 注解）
-4. 构建测试 classpath：`out/classes` + dependencies + devDependencies
+4. 构建测试运行 classpath：`out/classes` + `out/test-classes` + compile + runtime + provided + test scope 依赖
 5. 运行 JUnit Platform Console
 
 ### 工作空间模式
 
+**`ymc test <module>`（指定模块）：**
 1. 构建目标模块的传递闭包（所有上游依赖）
 2. 编译所有依赖模块
 3. 构建组合 classpath：所有依赖模块的 `out/classes/` + Maven JAR
 4. 仅编译和运行目标模块的测试
 
+**`ymc test`（无 target）：** 按拓扑层级测试所有模块。默认 fail-fast——任一模块测试失败立即停止。`--keep-going` 时继续测试无依赖关系的模块，最终汇总报告所有失败。
+
 ### 测试发现
 
-扫描测试目录中的 `.java` 文件，检查内容包含：
-- `@Test`
-- `@org.junit`
+扫描测试目录中的 `.java` 文件：
+1. 按命名约定过滤（`*Test.java`、`Test*.java`、`*Tests.java`，排除 `*IT.java`）
+2. 验证文件内容包含 `@Test` 或 `@org.junit` 注解引用
+3. 排除抽象类和非 public 类（通过简单文本匹配：`abstract class`）
 
 将文件路径转为类名：`src/test/java/com/example/FooTest.java` → `com.example.FooTest`
 
 ### JUnit Platform 执行
 
-**优先方式：** 查找 `junit-platform-console-standalone` JAR（从 devDependencies 解析）：
+**优先方式：** 查找 `junit-platform-console-standalone` JAR（从 `scope = "test"` 依赖解析）：
 ```
 java -jar junit-platform-console-standalone.jar
   --classpath {classpath}
@@ -97,7 +105,7 @@ java -jar junit-platform-console-standalone.jar
 
 启用 `--coverage` 时：
 
-1. 自动下载 JaCoCo agent（v0.8.12）到 `.ym/tools/jacocoagent.jar`
+1. 自动从 Maven Central 下载 JaCoCo agent 到 `.ym/tools/jacocoagent.jar`（版本默认 0.8.12，可通过 `compiler.jacocoVersion` 配置）
 2. 添加 JVM 参数：`-javaagent:jacocoagent.jar=destfile=out/coverage/jacoco.exec`
 3. 测试完成后生成 `out/coverage/jacoco.exec`
 4. 通过 JaCoCo CLI 生成 HTML 报告到 `out/coverage/html/`
@@ -106,10 +114,10 @@ java -jar junit-platform-console-standalone.jar
 
 `--watch` 启用后进入循环：
 
-1. 使用 `FileWatcher`（notify crate）监听源码和测试目录
+1. 使用 `FileWatcher`（notify crate）同时监听主源码目录和测试源码目录
 2. 文件变更 → 100ms 防抖
-3. 增量编译变更的源码/测试文件
-4. 重新运行受影响的测试
+3. 主源码变更 → 增量编译主源码 + 重编译测试 + 重跑测试
+4. 测试源码变更 → 增量编译测试 + 重跑受影响的测试
 
 ## 测试最佳实践建议
 
@@ -133,15 +141,12 @@ src/
 
 ### 依赖配置
 
-```json
-{
-  "devDependencies": {
-    "org.junit.jupiter:junit-jupiter": "^5.11.0",
-    "org.junit.platform:junit-platform-console-standalone": "^1.11.0",
-    "org.mockito:mockito-core": "^5.14.0",
-    "org.assertj:assertj-core": "^3.26.0"
-  }
-}
+```toml
+[dependencies]
+"org.junit.jupiter:junit-jupiter" = { version = "5.11.0", scope = "test" }
+"org.junit.platform:junit-platform-console-standalone" = { version = "1.11.0", scope = "test" }
+"org.mockito:mockito-core" = { version = "5.14.0", scope = "test" }
+"org.assertj:assertj-core" = { version = "3.26.0", scope = "test" }
 ```
 
 ## 已知限制

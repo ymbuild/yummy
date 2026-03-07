@@ -23,7 +23,7 @@ Installs `ym` and `ymc` to `~/.ym/bin/`.
 ```bash
 ym init -y my-app                   # Create project
 cd my-app
-ym add com.google.guava:guava       # Add dependency
+ym install com.google.guava:guava    # Add dependency
 ymc dev                             # Compile + run + hot reload
 ```
 
@@ -31,18 +31,18 @@ ymc dev                             # Compile + run + hot reload
 
 | | Gradle (2000 modules) | ym (2000 modules) |
 |---|---|---|
-| Config load | ~20 min (execute 2000 Groovy scripts) | ~2 sec (parse 2000 JSON files) |
+| Config load | ~20 min (execute 2000 Groovy scripts) | ~2 sec (parse 2000 TOML files) |
 | Startup | ~5s (JVM + Daemon) | ~5ms (native binary) |
 | Incremental build | ~30s | ~5s |
-| Config format | Groovy/Kotlin DSL | Declarative JSON |
+| Config format | Groovy/Kotlin DSL | Declarative TOML |
 
 ## Commands
 
 ```bash
 # Package manager (ym)
 ym install                          # Install all dependencies
-ym add <dep>                        # Add dependency
-ym remove <dep>                     # Remove dependency
+ym install <dep>                     # Add dependency
+ym uninstall <dep>                   # Remove dependency
 ym upgrade                          # Upgrade dependencies
 ym tree                             # Show dependency tree
 

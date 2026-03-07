@@ -8,12 +8,13 @@ ym 支持将 Java 库发布到 Maven 仓库（私有仓库、Maven Central、Git
 
 ```bash
 ym publish                               # 发布到默认仓库
+ym publish --registry internal           # 发布到指定仓库（按 [registries] 中的键名）
 ym publish --dry-run                     # 模拟发布（不上传）
 ```
 
 ### 发布流程
 
-1. 检查 `"private": true` → 拒绝发布
+1. 检查 `private = true` → 拒绝发布
 2. 执行 `prepublish` 脚本
 3. 编译项目
 4. 打包 JAR
@@ -23,7 +24,7 @@ ym publish --dry-run                     # 模拟发布（不上传）
 
 ### Maven 坐标提取
 
-从 `package.json` 的 `name` 字段提取 groupId 和 artifactId：
+从 `package.toml` 的 `name` 字段提取 groupId 和 artifactId：
 
 | name 格式 | groupId | artifactId |
 |-----------|---------|------------|
@@ -34,9 +35,9 @@ ym publish --dry-run                     # 模拟发布（不上传）
 
 ### POM 生成
 
-从 `package.json` 映射：
+从 `package.toml` 映射：
 
-| package.json | POM |
+| package.toml | POM |
 |-------------|-----|
 | `name`（冒号前） | `<groupId>` |
 | `name`（冒号后） | `<artifactId>` |
@@ -44,57 +45,86 @@ ym publish --dry-run                     # 模拟发布（不上传）
 | `description` | `<description>` |
 | `license` | `<license>` |
 | `dependencies` | `<dependencies>` |
+| `workspaceDependencies` | `<dependencies>`（从目标模块的 `package.toml` 的 `name` 字段提取 Maven 坐标） |
+
+**workspaceDependencies 映射：** 发布时，workspace 依赖通过查找目标模块的 `package.toml` 的 `name` 字段转为 Maven 坐标。例如 `workspaceDependencies = ["core"]` → 查找 core 的 `name = "com.example:core"` → POM 中写入 `<groupId>com.example</groupId><artifactId>core</artifactId><version>{core.version}</version>`。
+
+**Scope 映射：**
+
+| ym scope | POM 处理 |
+|----------|---------|
+| `compile` | 写入 `<dependencies>`，不写 `<scope>`（Maven 默认） |
+| `runtime` | 写入 `<dependencies>`，`<scope>runtime</scope>` |
+| `provided` | 写入 `<dependencies>`，`<scope>provided</scope>` |
+| `test` | **不写入 POM**（库的测试依赖不应暴露给消费者） |
 
 ### 仓库选择
 
-1. `package.json` 的 `registries` 中查找 `"default"` 键
-2. 无 `"default"` → 使用 `registries` 中第一个仓库
-3. 无 `registries` → 报错（不默认推到 Maven Central）
+1. `--registry <name>` → 使用 `[registries]` 中对应键名的仓库
+2. 无 `--registry` → 查找 `[registries]` 中的 `default` 键
+3. 无 `default` 且仅一个仓库 → 使用该仓库
+4. 无 `default` 且多个仓库 → 报错，要求使用 `--registry` 指定
+5. 无 `[registries]` → 报错，要求在 package.toml 中配置 `[registries]`（不默认推到 Maven Central）
 
 ## `ym login`
+
+支持多账户登录状态——同一台机器可以同时保存多个 Maven 仓库的凭证。
 
 ```bash
 ym login                                 # 交互式输入仓库 URL + 凭证
 ```
 
-凭证存储在 `.ym/credentials.json`（文件权限 0o600）：
+每次执行 `ym login` 会追加/更新指定仓库的凭证，不会覆盖已有的其他仓库凭证。
+
+### 凭证存储格式
+
+凭证存储在 `~/.ym/credentials.json`（文件权限 0o600），以仓库 URL 为键：
 
 ```json
 {
   "https://maven.example.com": {
     "username": "deploy",
     "password": "token_xxx"
+  },
+  "https://maven.pkg.github.com/OWNER/REPO": {
+    "username": "github-user",
+    "password": "ghp_xxx"
+  },
+  "https://private.nexus.company.com/repository/releases": {
+    "username": "ci-bot",
+    "password": "secret_token"
   }
 }
 ```
 
-**安全措施：**
+### 凭证查找
+
+`ym publish` 时根据目标 registry URL 查找对应凭证：
+
+1. 精确匹配 registry URL
+2. 忽略尾部斜杠后重试匹配
+3. 无匹配 → 报错提示 `ym login`
+4. 🔲 待实现：环境变量覆盖（优先于文件）：`YM_REGISTRY_USERNAME` + `YM_REGISTRY_PASSWORD`，或 `YM_REGISTRY_TOKEN`（Bearer 模式）
+
+### 安全措施
+
 - 文件权限设置为 600（仅所有者可读写，Unix）
-- `.gitignore` 应包含 `.ym/credentials.json`
+- 凭证文件位于 `~/.ym/credentials.json`（用户 home 目录），不在项目目录内，无 git 泄露风险
+- 凭证文件不含明文 registry 默认值，仅存储用户实际登录过的仓库
 
-## `ym link`
-
-本地跨项目开发（类似 `npm link`）。
+### 凭证管理命令
 
 ```bash
-# 在库项目中注册
-cd my-lib && ym link
-
-# 在消费项目中引用
-cd my-app && ym link my-lib
-
-# 查看已链接
-ym link --list
-
-# 解除链接
-ym link --unlink my-lib
+ym login                                 # 添加/更新仓库凭证
+ym login --list                          # 列出已登录的仓库（不显示密码）
+ym login --remove <registry-url>         # 移除指定仓库的凭证
 ```
 
-### 链接机制
-
-1. `ym link`（无参数）：在 `~/.ym/links/` 下创建符号链接，指向当前项目的 `out/classes/`
-2. `ym link <name>`：在当前项目中，将 `<name>` 的链接目录加入 classpath
-3. 平台适配：Unix 使用 `symlink`，Windows 使用 `junction`
+`--list` 输出示例：
+```
+  ✓ https://maven.example.com (username: deploy)
+  ✓ https://maven.pkg.github.com/OWNER/REPO (username: github-user)
+```
 
 ## 已知限制
 
@@ -105,8 +135,6 @@ ym link --unlink my-lib
 | 不支持 Sources JAR 上传 | 中 |
 | 不生成 SHA-256 校验文件上传 | 中 |
 | POM 不含 parent/dependencyManagement | 低 |
-| link 不支持传递依赖 | 低 |
-| prepublish/postpublish 脚本钩子未实现 | 中 |
 
 ## 优化路线图
 
@@ -128,12 +156,9 @@ ym link --unlink my-lib
 
 自动检测 GitHub Actions 环境，使用 `GITHUB_TOKEN` 发布：
 
-```json
-{
-  "registries": {
-    "github": "https://maven.pkg.github.com/OWNER/REPO"
-  }
-}
+```toml
+[registries]
+github = "https://maven.pkg.github.com/OWNER/REPO"
 ```
 
 ### P3 — 凭证环境变量

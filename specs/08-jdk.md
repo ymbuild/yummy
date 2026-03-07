@@ -63,6 +63,8 @@ macOS 额外检查 `/Contents/Home/bin/java` 路径。
 3. 缓存中无匹配版本
 4. `jvm.autoDownload` 为 true（默认）
 
+**非交互模式（CI/无 TTY）：** 静默下载默认供应商（Temurin）的对应版本，不弹出交互选择。
+
 ### 下载源
 
 | 供应商 | API | 说明 |
@@ -89,21 +91,28 @@ macOS 额外检查 `/Contents/Home/bin/java` 路径。
 
 ## JVM 参数管理
 
-```json
-{
-  "jvmArgs": ["-Xmx512m", "-XX:+UseG1GC"],
-  "env": {
-    "DEV_JAVA_HOME": "~/.ym/jdks/jbr-25",
-    "PROD_JAVA_HOME": "/usr/lib/jdk/graalvm-jdk-25"
-  },
-  "scripts": {
-    "dev": "JAVA_HOME=$DEV_JAVA_HOME ymc dev",
-    "build": "JAVA_HOME=$PROD_JAVA_HOME ymc build"
-  }
-}
+```toml
+jvmArgs = ["-Xmx512m", "-XX:+UseG1GC"]
+
+[env]
+DEV_JAVA_HOME = "~/.ym/jdks/jbr-25"
+PROD_JAVA_HOME = "/usr/lib/jdk/graalvm-jdk-25"
+
+[scripts]
+dev = "JAVA_HOME=$DEV_JAVA_HOME ymc dev"
+build = "JAVA_HOME=$PROD_JAVA_HOME ymc build"
 ```
 
-通过 `env` + `scripts` 实现 DEV/PROD JDK 分离。
+通过 `env` + `scripts` 实现 DEV/PROD JDK 分离。供应商配置不在 `[jvm]` 中，仅通过环境变量和路径控制。
+
+## 供应商选择
+
+`jvm.vendor` 不作为运行时配置。供应商选择仅在以下场景生效：
+
+- `ym init` 交互式引导时，选择下载哪个供应商的 JDK
+- `ensure_jdk()` 自动下载时，默认选择 Temurin（CI/非交互）或 JBR（开发）
+
+构建时只校验 JDK 版本与 `target` 匹配，不校验供应商。扫描到的任意 JDK 只要版本满足即可使用。
 
 ## 已知限制
 

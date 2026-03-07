@@ -41,6 +41,14 @@ root/
   libs/core/core.iml
 ```
 
+**模块间依赖：** `workspaceDependencies` 在 .iml 中生成为 IDEA module dependency（而非 JAR library 引用）：
+
+```xml
+<orderEntry type="module" module-name="core" scope="COMPILE" />
+```
+
+这样 IDEA 能正确识别模块间跳转和重构，无需将 workspace 模块的 `out/classes/` 作为 JAR 引用。
+
 ## 生成内容详情
 
 ### misc.xml
@@ -82,6 +90,17 @@ root/
   </library>
 </component>
 ```
+
+### Scope 映射
+
+.iml 中引用 library 时根据 ym scope 设置 IDEA scope：
+
+| ym scope | IDEA scope | 说明 |
+|----------|-----------|------|
+| `compile` | COMPILE | 默认，编译和运行时可见 |
+| `runtime` | RUNTIME | 仅运行时可见 |
+| `provided` | PROVIDED | 编译可见，不打包 |
+| `test` | TEST | 仅测试编译和运行可见 |
 
 ### WSL 路径自适应
 
@@ -128,9 +147,9 @@ root/
 ### P1 — IDEA 插件
 
 开发 IntelliJ 插件：
-- 读取 `package.json` 自动配置项目
-- 依赖变更时自动刷新（FileWatcher 监听 `package.json`）
-- 在 IDEA 内运行 `ym install` / `ymc build`
+- 读取 `package.toml` 自动配置项目
+- 依赖变更时自动刷新（FileWatcher 监听 `package.toml`）
+- 在 IDEA 内运行 `ym install` / `ymc build`（`ym install` 无参数安装所有依赖）
 - 与 IDEA 的 Run Configuration 集成
 
 ### P2 — VSCode 支持

@@ -2,7 +2,7 @@
 
 ## 概述
 
-ym 的依赖解析器负责将 `package.json` 中的 Maven 坐标解析为完整的传递依赖图，下载 JAR 到本地缓存，并通过锁文件保证可复现构建。
+ym 的依赖解析器负责将 `package.toml` 中的 Maven 坐标解析为完整的传递依赖图，下载 JAR 到本地缓存。
 
 ## 坐标格式
 
@@ -10,16 +10,22 @@ ym 的依赖解析器负责将 `package.json` 中的 Maven 坐标解析为完整
 groupId:artifactId  →  "com.fasterxml.jackson.core:jackson-databind": "2.19.0"
 ```
 
-- 版本前缀 `^` 和 `~` 会被自动剥离（当前不做语义化范围解析，直接使用精确版本）
-- 锁文件记录实际解析版本 + SHA-256
+- 仅支持精确版本号
+- 解析缓存记录实际解析版本 + SHA-256
+
+## Scope 与解析的关系
+
+用户在 `package.toml` 中声明的 `scope`（compile/runtime/provided/test）**不影响依赖解析过程**。所有 scope 的依赖都会参与传递依赖解析和 JAR 下载。scope 仅在后续阶段（classpath 构建、fat JAR 打包、POM 生成）生效。
+
+POM 文件中的 `<scope>` 是不同的概念——BFS 遍历时跳过 POM 中 `scope=test/provided/system` 的传递依赖（这是 Maven 标准行为）。
 
 ## 解析流程
 
-### 快速路径（锁文件命中）
+### 快速路径（缓存命中）
 
 ```
-package.json 中所有依赖都在 package-lock.json 中
-  && 所有 JAR 文件在本地缓存中存在
+package.toml 中所有依赖的 JAR 文件在本地缓存中存在
+  && .ym/resolved.json 中的依赖列表与 package.toml 一致
   && SHA-256 校验通过
   → 直接返回 JAR 路径列表，零网络请求
 ```
@@ -27,21 +33,22 @@ package.json 中所有依赖都在 package-lock.json 中
 ### 慢速路径（需要网络）
 
 ```
-1. 收集 package.json 中的直接依赖
+1. 收集 package.toml 中的直接依赖
 2. 分层并行 BFS 遍历：
    a. 获取 POM 文件（内存缓存 → 磁盘缓存 → 网络下载）
    b. 解析 <parent>（最多 20 级深度 + visited set 循环检测）
    c. 收集 <properties> 和 <dependencyManagement>
    d. BOM import：<scope>import</scope> + <type>pom</type> 递归解析
    e. 属性插值 ${property.name}（循环替换最多 10 轮，支持嵌套）
-   f. 解析 <dependencies>，跳过 scope=test/provided/system 和 optional
+   f. 解析 <dependencies>，跳过 scope=test/provided/system 和 optional=true；scope=runtime 的依赖正常包含（参与运行时 classpath）
    g. 版本冲突解决：nearest-wins（Maven 策略，记录解析深度）
+      同一深度出现同一 artifact 的不同版本时，以 BFS 遍历中先遇到的为准（与 Maven 行为一致）
    h. 同一深度的 POM 通过 rayon par_iter 并行获取和解析
-3. 应用 exclusions 过滤
-4. 应用 resolutions 版本覆盖
+3. 应用 exclusions 过滤（全局 `exclusions` 数组 + per-dependency `exclude` 字段）
+4. 应用 resolutions 版本覆盖（resolutions 永远优先于任何显式版本，包括直接依赖和子模块声明）
 5. 并行下载所有 JAR（rayon par_iter）
 6. SHA-256 校验
-7. 写入 package-lock.json
+7. 写入 .ym/resolved.json（内部缓存）
 ```
 
 ### BOM Import 解析
@@ -61,12 +68,26 @@ package.json 中所有依赖都在 package-lock.json 中
 - 同一 `groupId:artifactId` 出现多个版本时，取深度最浅的
 - `resolutions` 中的固定版本始终优先（覆盖 nearest-wins）
 
-### 仓库顺序
+### 仓库顺序与 Scope 路由
 
-1. `registries` 中配置的自定义仓库（按配置顺序）
-2. Maven Central: `https://repo1.maven.org/maven2`
+`registries` 中的仓库 value 支持两种格式：
+- **字符串：** 纯 URL，适用于所有依赖
+- **对象：** `{url = "...", scope = "com.mycompany.*"}`，仅匹配 `scope` 前缀的 groupId 才查此仓库
 
-支持 `.ym/credentials.json` 中的 Basic Auth 凭证。
+**解析策略：**
+1. 如果依赖的 groupId 匹配某个仓库的 `scope` → 只从该仓库拉取（不 fallback 到其他仓库）
+2. 无 scope 匹配的依赖 → 按配置顺序查无 scope 的仓库，最后查 Maven Central
+3. Maven Central（`https://repo1.maven.org/maven2`）始终作为兜底（除非依赖已被 scope 路由）
+
+对于每个依赖，按上述规则逐个尝试。第一个仓库返回 404 后尝试下一个，直到找到或全部失败。不做并行查询（避免向所有仓库泄露依赖列表）。
+
+### 凭证认证
+
+私有仓库下载 POM/JAR 时使用 `~/.ym/credentials.json` 中的 Basic Auth 凭证。查找规则与发布时一致（详见 [10-publish.md](10-publish.md)）：
+
+1. 精确匹配 registry URL
+2. 忽略尾部斜杠后重试
+3. 🔲 待实现：环境变量覆盖（优先）：`YM_REGISTRY_USERNAME` + `YM_REGISTRY_PASSWORD`，或 `YM_REGISTRY_TOKEN`（Bearer）
 
 ## POM 缓存
 
@@ -102,15 +123,15 @@ impl PomCache {
 pub fn resolve_workspace_deps(
     ws: &WorkspaceGraph,
     cache_dir: &Path,
-    lock: &mut LockFile,
+    resolved: &mut ResolvedCache,
     repos: &[String],
     exclusions: &[String],
 ) -> Result<HashMap<String, Vec<PathBuf>>>
 ```
 
-1. 收集所有模块的 `dependencies` + `devDependencies` → 合并去重
+1. 收集所有模块的 `dependencies`（所有 scope）→ 合并去重
 2. 一次性解析完整传递依赖图
-3. 按模块分发：遍历 lock file 依赖图，为每个模块筛选其直接依赖的传递闭包
+3. 按模块分发：遍历解析缓存依赖图，为每个模块筛选其直接依赖的传递闭包
 
 ## 缓存结构
 
@@ -128,37 +149,36 @@ pub fn resolve_workspace_deps(
       2.19.0.pom
 ```
 
-## 锁文件格式 (package-lock.json)
+## 内部缓存 (.ym/resolved.json)
 
-```json
-{
-  "version": 1,
-  "dependencies": {
-    "com.fasterxml.jackson.core:jackson-databind:2.19.0": {
-      "sha256": "abc123...",
-      "dependencies": [
-        "com.fasterxml.jackson.core:jackson-core:2.19.0",
-        "com.fasterxml.jackson.core:jackson-annotations:2.19.0"
-      ]
-    }
-  }
-}
-```
+解析结果缓存在 `.ym/resolved.json`，用户不需要直接操作此文件：
+- 记录完整传递依赖树 + SHA-256
+- `ym install`（无参数）时自动判断缓存是否有效
+- 缓存失效时自动重新解析
+
+**缓存失效条件（任一变化即失效）：**
+- `[dependencies]` 变更（增删改依赖）
+- `[resolutions]` 变更（版本覆盖改变）
+- `exclusions` 变更（全局排除改变）
+- `[registries]` 变更（仓库 URL/顺序/scope 改变）
 
 ## 已知限制
 
 | 问题 | 影响 | 严重性 |
 |------|------|--------|
-| 不支持 version range | `[1.0,2.0)` 等 Maven 范围不生效 | 中 |
 | 不支持 classifier | `natives-linux` 等分类器 JAR 无法获取 | 中 |
 | 无 SNAPSHOT 支持 | 开发阶段依赖 | 中 |
 | 无代理支持 | 企业内网无法使用 | 中 |
+| 下载无总超时限制 | 大文件下载可能无限等待 | 低 |
+
+### 下载失败策略
+
+JAR/POM 下载失败时：
+1. 重试最多 3 次，指数退避（1s → 2s → 4s）
+2. 所有重试失败 → 报错并列出失败的坐标
+3. 部分依赖失败不影响已成功下载的依赖（但整体解析标记为失败）
 
 ## 优化路线图
-
-### P0 — Version Range 支持
-
-解析 Maven 版本范围语法 `[1.0,2.0)`，在候选版本中选择最高匹配。
 
 ### P1 — Classifier 支持
 
