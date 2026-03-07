@@ -17,9 +17,10 @@ ym doctor --fix                          # 自动修复
 
 检查项：
 - package.json 存在且可解析
-- JDK 可用且版本匹配
-- 依赖缓存完整性
+- JDK 可用且版本匹配 `target`
+- 依赖缓存完整性（JAR 文件存在）
 - 锁文件与 package.json 同步
+- `.ym/` 目录权限
 
 ### `ym env`
 
@@ -39,7 +40,7 @@ ym env
 ym validate
 ```
 
-检查：字段类型、依赖格式、版本格式、引用完整性。
+检查：字段类型、依赖坐标格式（`groupId:artifactId`）、版本格式、workspaceDependencies 引用完整性。
 
 ### `ym verify`
 
@@ -49,16 +50,18 @@ ym validate
 ym verify
 ```
 
-逐个对比 JAR 的 SHA-256 与锁文件记录。
+逐个对比 JAR 的 SHA-256 与锁文件记录。发现不一致时报告并可选重新下载。
 
 ### `ym audit`
 
-检查依赖的已知漏洞。
+检查依赖的已知漏洞（使用 OSV.dev API）。
 
 ```bash
-ym audit
-ym audit --json
+ym audit                                 # 检查并报告
+ym audit --json                          # JSON 输出（CI 集成）
 ```
+
+输出包含：CVE 编号、严重级别、受影响版本、修复版本建议。
 
 ### `ym why <dep>`
 
@@ -69,6 +72,7 @@ ym why jackson-core
 ```
 
 显示依赖链：`package.json → jackson-databind → jackson-core`
+支持模糊匹配 artifactId。
 
 ### `ym tree`
 
@@ -86,8 +90,8 @@ ym tree --json                           # JSON 输出
 平坦依赖列表。
 
 ```bash
-ym deps
-ym deps --json
+ym deps                                  # 列出所有依赖
+ym deps --json                           # JSON 输出
 ym deps --outdated                       # 仅显示过时的
 ```
 
@@ -96,9 +100,11 @@ ym deps --outdated                       # 仅显示过时的
 检查所有依赖的许可证。
 
 ```bash
-ym license
-ym license --json
+ym license                               # 列出许可证
+ym license --json                        # JSON 输出
 ```
+
+从 POM 文件中提取 `<license>` 信息。
 
 ### `ymc graph`
 
@@ -106,8 +112,8 @@ ym license --json
 
 ```bash
 ymc graph                                # 文本输出
-ymc graph --dot                          # DOT 格式
-ymc graph --reverse                      # 反向依赖
+ymc graph --dot                          # DOT 格式（可用 Graphviz 可视化）
+ymc graph --reverse                      # 反向依赖（谁依赖了我）
 ymc graph --depth 2                      # 限制深度
 ```
 
@@ -129,7 +135,7 @@ ymc size
 ymc hash
 ```
 
-基于 package.json + 源码内容计算确定性哈希。
+基于 package.json + 源码内容计算确定性哈希。可用于 CI 缓存的 cache key。
 
 ### `ymc diff`
 
@@ -139,6 +145,8 @@ ymc hash
 ymc diff
 ```
 
+基于指纹系统（Fingerprints），比较当前源码与上次编译时的 source_hash。
+
 ### `ymc classpath`
 
 输出项目 classpath。
@@ -147,6 +155,8 @@ ymc diff
 ymc classpath                            # 输出完整 classpath 字符串
 ymc classpath <module>                   # 工作空间模式
 ```
+
+可用于集成外部工具：`java -cp $(ymc classpath) com.example.Tool`
 
 ### `ymc exec`
 
@@ -170,7 +180,7 @@ ym config target 21                      # 设置
 管理依赖缓存。
 
 ```bash
-ym cache list                            # 显示缓存大小
+ym cache list                            # 显示缓存大小（Maven + POM + 指纹）
 ym cache clean                           # 清理全部
 ym cache clean --maven-only              # 仅清理 Maven 缓存
 ```
@@ -186,11 +196,11 @@ ymc clean --all                          # 清理 out/ + .ym/cache/
 
 ### `ymc fmt`
 
-格式化 Java 源码。
+格式化 Java 源码（使用 google-java-format）。
 
 ```bash
 ymc fmt                                  # 格式化
-ymc fmt --check                          # 仅检查
+ymc fmt --check                          # 仅检查（CI 模式）
 ymc fmt --diff                           # 显示差异
 ```
 
@@ -199,7 +209,7 @@ ymc fmt --diff                           # 显示差异
 生成 Javadoc。
 
 ```bash
-ymc doc                                  # 生成文档
+ymc doc                                  # 生成文档到 out/docs/
 ymc doc --open                           # 生成并打开浏览器
 ```
 
@@ -211,6 +221,8 @@ JMH 基准测试。
 ymc bench                                # 运行所有基准
 ymc bench --filter "BenchmarkName"       # 过滤
 ```
+
+自动将 JMH 注解处理器加入 classpath。
 
 ### `ymc watch`
 
@@ -229,3 +241,5 @@ ymc watch --ext ".java,.xml" -- ymc test # 自定义扩展名
 ymc rebuild                              # clean + build
 ymc rebuild --release                    # clean + build --release
 ```
+
+等价于 `ymc clean && ymc build [--release]`。

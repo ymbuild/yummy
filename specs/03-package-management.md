@@ -2,114 +2,137 @@
 
 ## 概述
 
-ym 的包管理命令对标 npm/yarn，提供依赖的增删查改生命周期管理。
+ym 提供一组包管理命令，用于依赖的安装、添加、删除、升级、搜索和版本管理。版本语法兼容 npm/yarn（`^`/`~` 前缀）。
 
-## 命令清单
+## 命令
 
 ### `ym install`
 
-安装 `package.json` 中所有依赖到本地缓存。
+安装 `package.json` 中声明的所有依赖。
 
 ```bash
-ym install
-```
-
-- 调用 `resolve_and_download()` 解析并下载所有 dependencies + devDependencies
-- 生成/更新 `package-lock.json`
-- 快速路径：锁文件 + 缓存都在 → 秒级完成
-
-### `ym add <dep>`
-
-添加依赖到 `package.json`。
-
-```bash
-ym add com.google.guava:guava           # 自动获取最新版本
-ym add com.google.guava:guava@33.0      # 指定版本
-ym add guava                            # 搜索 Maven Central 并选择
-ym add -D junit-jupiter                 # 添加到 devDependencies
-ym add -W core                          # 添加工作空间模块间依赖
+ym install                               # 安装所有依赖
 ```
 
 **流程：**
-1. 解析坐标（支持简短名称 → Maven Central 搜索）
-2. 无版本 → 查询最新 release 版本
-3. 写入 `package.json` 的 dependencies/devDependencies
-4. 调用 `resolve_and_download()` 更新锁文件
+1. 读取 `package.json` 的 `dependencies` + `devDependencies`
+2. 检查 `package-lock.json` 是否存在且匹配
+3. 快速路径：锁文件命中 + 缓存 JAR 存在 → 零网络请求
+4. 慢速路径：解析传递依赖 → 下载 → 校验 → 更新锁文件
 
-### `ym remove <dep>`
+### `ym add`
 
-从 `package.json` 移除依赖。
+添加新依赖。
 
 ```bash
-ym remove com.google.guava:guava
-ym remove -D junit-jupiter              # 从 devDependencies 移除
+ym add com.google.guava:guava            # 添加依赖（自动获取最新版本，^前缀）
+ym add com.google.guava:guava@33.0.0     # 指定版本
+ym add jackson-databind                  # 模糊搜索：按 artifactId 搜索 Maven Central
+ym add guava -D                          # 添加到 devDependencies
+ym add core -W                           # 添加到 workspaceDependencies
 ```
+
+**版本行为：**
+- 自动获取版本时，添加 `^` 前缀（如 `"^33.0.0"`），表示允许兼容升级
+- 显式指定版本时，使用原始值
+- 下载失败时显示警告但仍写入 package.json（下次 build 时解析）
+
+**模糊搜索：**
+- 当输入不含 `:` 时，按 artifactId 搜索 Maven Central
+- 显示候选列表，交互式选择
+
+### `ym remove`
+
+移除依赖。
+
+```bash
+ym remove com.google.guava:guava         # 精确匹配
+ym remove guava                          # 模糊匹配：按 artifactId 后缀查找
+ym remove guava -D                       # 从 devDependencies 移除
+```
+
+**模糊匹配：** 当输入不含 `:` 时，搜索所有依赖的 artifactId 部分。
 
 ### `ym upgrade`
 
 升级依赖到最新版本。
 
 ```bash
-ym upgrade                              # 升级所有
-ym upgrade -i                           # 交互式选择
+ym upgrade                               # 升级所有依赖
+ym upgrade -i                            # 交互式选择要升级的依赖
 ```
 
-- 查询每个依赖的最新版本
-- 对比当前版本，显示可升级列表
-- 交互模式：checkbox 多选
+**升级规则：**
+- 遵守版本前缀：`^1.2.3` 允许升级到 `<2.0.0`，`~1.2.3` 允许升级到 `<1.3.0`
+- 无前缀的精确版本不自动升级（除非 `-i` 交互确认）
+- 升级后更新 package.json 和 package-lock.json
 
 ### `ym outdated`
 
-检查过时依赖（不修改，仅报告）。
+检查哪些依赖有新版本（不修改，仅报告）。
 
 ```bash
-ym outdated
-ym outdated --json
+ym outdated                              # 列出过时依赖
+ym outdated --json                       # JSON 输出（CI 集成）
 ```
 
-输出格式：
-
+输出：
 ```
 Package                                    Current   Latest
 com.fasterxml.jackson.core:jackson-databind  2.17.0    2.19.0
+com.google.guava:guava                       32.1.3    33.0.0
 ```
+
+### `ym search`
+
+搜索 Maven Central 仓库（类似 `apt search`）。
+
+```bash
+ym search jackson                        # 按关键词搜索
+ym search jackson --limit 20             # 限制结果数（默认 10）
+```
+
+**搜索方式：** 查询 Maven Central Search API（`search.maven.org`）。按 artifactId 和 groupId 匹配。
+
+**输出格式：**
+```
+com.fasterxml.jackson.core:jackson-databind    2.19.0
+com.fasterxml.jackson.core:jackson-core        2.19.0
+com.fasterxml.jackson.core:jackson-annotations 2.19.0
+com.fasterxml.jackson.dataformat:jackson-dataformat-yaml 2.19.0
+```
+
+**与 `ym add` 的区别：**
+- `ym search` 只搜索展示，不修改 package.json
+- `ym add jackson-databind` 搜索并直接添加选中的依赖
 
 ### `ym lock`
 
-重新生成锁文件。
+重建锁文件。
 
 ```bash
-ym lock                                 # 重新解析并生成
-ym lock --check                         # CI 模式：检查锁文件是否最新
+ym lock                                  # 重新解析并生成锁文件
+ym lock --check                          # 仅检查锁文件是否最新（CI 模式，不修改）
 ```
 
-`--check` 在 CI 中使用，锁文件过期则 exit 1。
+`--check` 模式：如果锁文件与 package.json 不同步，返回非零退出码。适用于 CI 防止未提交的依赖变更。
 
 ### `ym dedupe`
 
-去重锁文件中的依赖版本。
+去重传递依赖。
 
 ```bash
-ym dedupe
-ym dedupe --dry-run                     # 仅显示，不修改
+ym dedupe                                # 执行去重
+ym dedupe --dry-run                      # 仅显示可去重项
 ```
 
-### `ym pin <dep>`
+### `ym pin`
 
-固定依赖版本，防止 `ym upgrade` 升级。
-
-```bash
-ym pin com.google.guava:guava
-ym pin --unpin com.google.guava:guava
-```
-
-### `ym search <query>`
-
-搜索 Maven Central。
+固定依赖版本（移除 `^`/`~` 前缀）。
 
 ```bash
-ym search jackson
-ym search jackson --limit 20
+ym pin com.google.guava:guava            # 固定版本：^33.0.0 → 33.0.0
+ym pin --unpin com.google.guava:guava    # 恢复前缀：33.0.0 → ^33.0.0
 ```
 
 ### `ym sources`
@@ -117,13 +140,38 @@ ym search jackson --limit 20
 下载所有依赖的 `-sources.jar`（用于 IDE 调试跳转）。
 
 ```bash
-ym sources
+ym sources                               # 下载所有源码 JAR
 ```
 
-## 待改进
+## 已知限制
 
-- [ ] `ym add` 支持从 URL 安装（本地 JAR 或远程 JAR）
-- [ ] `ym add` 支持 Git 仓库依赖
-- [ ] `ym upgrade` 支持 semver 范围约束（仅升级 minor/patch）
-- [ ] `ym cache` 支持离线模式（`--offline` 标志）
-- [ ] `ym install --frozen` 严格模式（锁文件不匹配直接失败）
+- [ ] 不支持 URL 依赖（`https://...`）
+- [ ] 不支持 Git 依赖（`git+https://...`）
+- [ ] `^`/`~` 前缀当前被剥离后精确匹配，未做真正的范围解析
+- [ ] 无 `--frozen` 锁文件模式（CI 中禁止任何锁文件修改）
+- [ ] 无离线模式（`--offline`）
+
+## 优化路线图
+
+### P0 — `--frozen` 模式
+
+```bash
+ym install --frozen                      # 严格按锁文件安装，任何不匹配则报错
+```
+
+适用于 CI 环境，防止意外的依赖变更。
+
+### P1 — Version Range 真正解析
+
+实际解析 `^`/`~` 前缀含义，查询 Maven Central 候选版本，选择最高匹配：
+
+| 前缀 | 当前值 | 候选版本 | 选择结果 |
+|------|--------|---------|---------|
+| `^1.2.3` | — | 1.2.3, 1.2.5, 1.3.0, 2.0.0 | 1.3.0 |
+| `~1.2.3` | — | 1.2.3, 1.2.5, 1.3.0 | 1.2.5 |
+
+### P2 — 离线模式
+
+```bash
+ym install --offline                     # 仅使用本地缓存，不发网络请求
+```
