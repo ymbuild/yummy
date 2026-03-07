@@ -309,34 +309,37 @@ fn identify_changed_modules(
 }
 
 /// Recompile only affected modules (changed + downstream dependents).
+/// Maintains topological order from all_packages for correct compilation sequence.
 fn recompile_affected_modules(
     changed_modules: &[String],
     all_packages: &[String],
     ws: &WorkspaceGraph,
     full_classpath: &[std::path::PathBuf],
 ) -> bool {
-    // Find all downstream dependents of the changed modules
-    let mut to_recompile: Vec<String> = changed_modules.to_vec();
+    // Find all downstream dependents of the changed modules.
+    // We iterate all_packages in topological order (deps first), so when we check
+    // a package's dependencies, any transitive dependent is already marked.
+    let mut affected: std::collections::HashSet<String> = changed_modules.iter().cloned().collect();
 
     for pkg_name in all_packages {
-        if to_recompile.contains(pkg_name) {
+        if affected.contains(pkg_name) {
             continue;
         }
-        // Check if this package depends (transitively) on any changed module
         if let Some(pkg) = ws.get_package(pkg_name) {
             if let Some(ref ws_deps) = pkg.config.workspace_dependencies {
-                for dep in ws_deps {
-                    if to_recompile.contains(dep) && !to_recompile.contains(pkg_name) {
-                        to_recompile.push(pkg_name.clone());
-                        break;
-                    }
+                // If any of this module's deps are affected, this module is too
+                if ws_deps.iter().any(|dep| affected.contains(dep)) {
+                    affected.insert(pkg_name.clone());
                 }
             }
         }
     }
 
-    // Recompile each affected module in order
-    for pkg_name in &to_recompile {
+    // Recompile in topological order (important: deps before dependents)
+    for pkg_name in all_packages {
+        if !affected.contains(pkg_name) {
+            continue;
+        }
         if let Some(pkg) = ws.get_package(pkg_name) {
             let result = super::build::compile_project(&pkg.path, &pkg.config, full_classpath);
             match result {

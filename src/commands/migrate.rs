@@ -361,10 +361,12 @@ fn parse_gradle_project_dependency(line: &str) -> Option<String> {
         "implementation", "api", "compile",
         "testImplementation", "testCompile",
     ];
-    let is_dep_line = prefixes.iter().any(|p| line.starts_with(p));
+    let trimmed = line.trim_start();
+    let is_dep_line = prefixes.iter().any(|p| trimmed.starts_with(p));
     if !is_dep_line {
         return None;
     }
+    let line = trimmed;
 
     // Look for project( or project (
     let proj_idx = line.find("project(")?;
@@ -652,9 +654,11 @@ fn extract_string_value(line: &str) -> Option<String> {
 }
 
 fn parse_gradle_dependency(line: &str, prefix: &str) -> Option<(String, String)> {
-    if !line.starts_with(prefix) {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with(prefix) {
         return None;
     }
+    let line = trimmed;
     // Skip project() dependencies
     if line.contains("project(") {
         return None;
@@ -828,5 +832,137 @@ dependencies {
         let doc = roxmltree::Document::parse(pom).unwrap();
         let modules = find_modules(&doc.root_element());
         assert_eq!(modules, vec!["core", "web", "api"]);
+    }
+
+    #[test]
+    fn test_gradle_kotlin_dsl_dependency() {
+        // Kotlin DSL uses implementation("group:artifact:version")
+        let dep = parse_gradle_dependency(
+            r#"    implementation("org.springframework.boot:spring-boot-starter-web:3.2.0")"#,
+            "implementation",
+        );
+        assert!(dep.is_some());
+        let (coord, ver) = dep.unwrap();
+        assert_eq!(coord, "org.springframework.boot:spring-boot-starter-web");
+        assert_eq!(ver, "3.2.0");
+    }
+
+    #[test]
+    fn test_gradle_kotlin_dsl_test_dep() {
+        let dep = parse_gradle_dependency(
+            r#"    testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")"#,
+            "testImplementation",
+        );
+        assert!(dep.is_some());
+        let (coord, ver) = dep.unwrap();
+        assert_eq!(coord, "org.junit.jupiter:junit-jupiter");
+        assert_eq!(ver, "5.10.0");
+    }
+
+    #[test]
+    fn test_migrate_pom_multimodule_detection() {
+        let tmpdir = std::env::temp_dir().join("ym-pom-multimod-test");
+        let _ = std::fs::remove_dir_all(&tmpdir);
+        std::fs::create_dir_all(&tmpdir).unwrap();
+
+        let pom = r#"<?xml version="1.0"?>
+<project>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+    <modules>
+        <module>core</module>
+        <module>web</module>
+    </modules>
+</project>"#;
+        std::fs::write(tmpdir.join("pom.xml"), pom).unwrap();
+
+        let cfg = migrate_from_pom(&tmpdir.join("pom.xml")).unwrap();
+        assert_eq!(cfg.private, Some(true));
+        assert!(cfg.workspaces.is_some());
+        let ws = cfg.workspaces.unwrap();
+        assert!(ws.contains(&"core/*".to_string()));
+        assert!(ws.contains(&"web/*".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    #[test]
+    fn test_gradle_project_dep_kotlin_dsl() {
+        // Kotlin DSL project dependency
+        assert_eq!(
+            parse_gradle_project_dependency(r#"    implementation(project(":common"))"#),
+            Some(":common".to_string())
+        );
+    }
+
+    #[test]
+    fn test_gradle_project_dep_api_scope() {
+        assert_eq!(
+            parse_gradle_project_dependency("api project(':shared-lib')"),
+            Some(":shared-lib".to_string())
+        );
+    }
+
+    #[test]
+    fn test_settings_gradle_separate_includes() {
+        let tmpdir = std::env::temp_dir().join("ym-settings-sep-test");
+        let _ = std::fs::remove_dir_all(&tmpdir);
+        std::fs::create_dir_all(&tmpdir).unwrap();
+
+        // Each include on separate line
+        std::fs::write(
+            tmpdir.join("settings.gradle"),
+            "include ':core'\ninclude ':web'\ninclude ':api'\n",
+        )
+        .unwrap();
+
+        let modules = parse_settings_gradle(&tmpdir.join("settings.gradle")).unwrap();
+        assert_eq!(modules.len(), 3);
+        assert!(modules.contains(&"core".to_string()));
+        assert!(modules.contains(&"web".to_string()));
+        assert!(modules.contains(&"api".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    #[test]
+    fn test_extract_string_value_variants() {
+        assert_eq!(extract_string_value("key = 'value'"), Some("value".to_string()));
+        assert_eq!(extract_string_value("key = \"value\""), Some("value".to_string()));
+        assert_eq!(extract_string_value("key = plain"), Some("plain".to_string()));
+        assert_eq!(extract_string_value("no_equals"), None);
+        assert_eq!(extract_string_value("key = "), None);
+    }
+
+    #[test]
+    fn test_detect_java_version_from_properties() {
+        let pom = r#"<?xml version="1.0"?>
+<project>
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+</project>"#;
+        let doc = roxmltree::Document::parse(pom).unwrap();
+        assert_eq!(detect_java_version(&doc.root_element()), Some("21".to_string()));
+    }
+
+    #[test]
+    fn test_detect_main_class() {
+        let pom = r#"<?xml version="1.0"?>
+<project>
+    <build>
+        <plugins>
+            <plugin>
+                <configuration>
+                    <mainClass>com.example.App</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>"#;
+        let doc = roxmltree::Document::parse(pom).unwrap();
+        assert_eq!(detect_main_class(&doc.root_element()), Some("com.example.App".to_string()));
     }
 }

@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use crate::config::schema::{LockFile, LockedDependency};
 
 /// A parsed Maven coordinate
+#[derive(Clone)]
 pub struct MavenCoord {
     pub group_id: String,
     pub artifact_id: String,
@@ -160,53 +161,91 @@ pub fn resolve_and_download_full(
         queue.push_back(mc);
     }
 
-    while let Some(coord) = queue.pop_front() {
-        let key = coord.versioned_key();
-        let ga_key = format!("{}:{}", coord.group_id, coord.artifact_id);
-        let current_depth = depth_map.get(&key).copied().unwrap_or(0);
+    while !queue.is_empty() {
+        // Drain the current level for batched processing
+        let mut current_level: Vec<MavenCoord> = Vec::new();
+        while let Some(coord) = queue.pop_front() {
+            let key = coord.versioned_key();
+            let ga_key = format!("{}:{}", coord.group_id, coord.artifact_id);
+            let current_depth = depth_map.get(&key).copied().unwrap_or(0);
 
-        if visited.contains(&key) {
-            continue;
-        }
-
-        // Nearest-wins: if we already resolved this GA at a shallower depth
-        // with a different version, skip this deeper version
-        if let Some(&(resolved_depth, ref resolved_ver)) = resolved_versions.get(&ga_key) {
-            if resolved_ver != &coord.version && resolved_depth < current_depth {
-                continue; // A nearer version was already chosen
+            if visited.contains(&key) {
+                continue;
             }
+
+            // Nearest-wins: if we already resolved this GA at a shallower depth
+            // with a different version, skip this deeper version
+            if let Some(&(resolved_depth, ref resolved_ver)) = resolved_versions.get(&ga_key) {
+                if resolved_ver != &coord.version && resolved_depth < current_depth {
+                    continue;
+                }
+            }
+
+            visited.insert(key.clone());
+            ordered_keys.push(key.clone());
+            resolved_versions.entry(ga_key).or_insert((current_depth, coord.version.clone()));
+
+            // Queue JAR download if not cached
+            let jar_path = coord.jar_path(cache_dir);
+            if !jar_path.exists() {
+                coords_to_download.push((key, coord.clone()));
+            } else {
+                // Still need to record the key for lock file
+                let _ = &key;
+            }
+
+            current_level.push(coord);
         }
 
-        visited.insert(key.clone());
-        ordered_keys.push(key.clone());
-        resolved_versions.entry(ga_key).or_insert((current_depth, coord.version.clone()));
-
-        // Download POM for transitive deps with in-memory + disk cache
-        let transitive = resolve_transitive_cached(&client, &coord, cache_dir, &repo_urls, Some(&pom_cache))?;
-
-        // Apply exclusions: filter out excluded transitive dependencies
-        let transitive: Vec<MavenCoord> = transitive
-            .into_iter()
-            .filter(|dep| {
-                let dep_key = format!("{}:{}", dep.group_id, dep.artifact_id);
-                !exclusion_set.contains(&dep_key)
-            })
-            .collect();
-
-        let dep_keys: Vec<String> = transitive.iter().map(|c| c.versioned_key()).collect();
-        dep_map.insert(key.clone(), dep_keys);
-
-        // Queue JAR download if not cached
-        let jar_path = coord.jar_path(cache_dir);
-        if !jar_path.exists() {
-            coords_to_download.push((key, coord));
+        if current_level.is_empty() {
+            break;
         }
 
-        let child_depth = current_depth + 1;
-        for dep in transitive {
-            let dep_vk = dep.versioned_key();
-            depth_map.entry(dep_vk).or_insert(child_depth);
-            queue.push_back(dep);
+        // Resolve transitive deps for this level (parallel if > 1 item and POMs not cached)
+        let level_results: Vec<(MavenCoord, Vec<MavenCoord>)> = if current_level.len() > 1 {
+            current_level
+                .par_iter()
+                .map(|coord| {
+                    let transitive = resolve_transitive_cached(
+                        &client, coord, cache_dir, &repo_urls, Some(&pom_cache),
+                    ).unwrap_or_default();
+                    (coord.clone(), transitive)
+                })
+                .collect()
+        } else {
+            current_level
+                .iter()
+                .map(|coord| {
+                    let transitive = resolve_transitive_cached(
+                        &client, coord, cache_dir, &repo_urls, Some(&pom_cache),
+                    ).unwrap_or_default();
+                    (coord.clone(), transitive)
+                })
+                .collect()
+        };
+
+        for (coord, transitive) in level_results {
+            let key = coord.versioned_key();
+            let current_depth = depth_map.get(&key).copied().unwrap_or(0);
+
+            // Apply exclusions
+            let transitive: Vec<MavenCoord> = transitive
+                .into_iter()
+                .filter(|dep| {
+                    let dep_key = format!("{}:{}", dep.group_id, dep.artifact_id);
+                    !exclusion_set.contains(&dep_key)
+                })
+                .collect();
+
+            let dep_keys: Vec<String> = transitive.iter().map(|c| c.versioned_key()).collect();
+            dep_map.insert(key, dep_keys);
+
+            let child_depth = current_depth + 1;
+            for dep in transitive {
+                let dep_vk = dep.versioned_key();
+                depth_map.entry(dep_vk).or_insert(child_depth);
+                queue.push_back(dep);
+            }
         }
     }
 
@@ -952,34 +991,70 @@ pub fn resolve_workspace_deps(
     }
 
     // 2. Resolve once for the entire workspace
-    let all_jars = resolve_and_download_full(&merged_deps, cache_dir, lock, repos, exclusions)?;
+    let _all_jars = resolve_and_download_full(&merged_deps, cache_dir, lock, repos, exclusions)?;
 
-    // 3. Build a lookup: groupId:artifactId -> jar path
-    let mut jar_lookup: HashMap<String, PathBuf> = HashMap::new();
-    for jar in &all_jars {
-        // Extract group:artifact from the cache path structure: cache/group/artifact/version/artifact-version.jar
-        if let Some(version_dir) = jar.parent() {
-            if let Some(artifact_dir) = version_dir.parent() {
-                if let Some(group_dir) = artifact_dir.parent() {
-                    let artifact = artifact_dir.file_name().unwrap().to_string_lossy();
-                    let group = group_dir.file_name().unwrap().to_string_lossy();
-                    let version = version_dir.file_name().unwrap().to_string_lossy();
-                    let key = format!("{}:{}:{}", group, artifact, version);
-                    jar_lookup.insert(key, jar.clone());
-                    // Also insert without version for simpler lookup
-                    let ga_key = format!("{}:{}", group, artifact);
-                    jar_lookup.entry(ga_key).or_insert(jar.clone());
-                }
-            }
+    // 3. Build a versioned key lookup: groupId:artifactId -> versioned key (g:a:v)
+    //    using resolved_versions from the lock file
+    let mut ga_to_versioned: HashMap<String, String> = HashMap::new();
+    for key in lock.dependencies.keys() {
+        let parts: Vec<&str> = key.split(':').collect();
+        if parts.len() == 3 {
+            let ga = format!("{}:{}", parts[0], parts[1]);
+            ga_to_versioned.entry(ga).or_insert(key.clone());
         }
     }
 
-    // 4. Distribute jars per module: each module gets the full resolved set
-    //    (since transitive deps are shared across the workspace)
+    // 4. Per module: walk the lock file graph to collect only relevant jars
     let mut per_module = HashMap::new();
-    for (name, _deps) in all_module_deps {
-        // Each module gets all resolved jars (workspace shares classpath)
-        per_module.insert(name.clone(), all_jars.clone());
+    for (name, deps) in all_module_deps {
+        let mut module_jars = Vec::new();
+        let mut visited_keys = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        // Seed with this module's direct deps
+        for (coord, version) in deps {
+            let mc = MavenCoord::parse(coord, version);
+            if let Ok(mc) = mc {
+                let vk = mc.versioned_key();
+                // Try exact match first, then GA lookup
+                if lock.dependencies.contains_key(&vk) {
+                    queue.push_back(vk);
+                } else if let Some(resolved_key) = ga_to_versioned.get(coord) {
+                    queue.push_back(resolved_key.clone());
+                }
+            }
+        }
+
+        // BFS through lock file dep graph
+        while let Some(key) = queue.pop_front() {
+            if !visited_keys.insert(key.clone()) {
+                continue;
+            }
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() == 3 {
+                let coord = MavenCoord {
+                    group_id: parts[0].to_string(),
+                    artifact_id: parts[1].to_string(),
+                    version: parts[2].to_string(),
+                };
+                let jar = coord.jar_path(cache_dir);
+                if jar.exists() {
+                    module_jars.push(jar);
+                }
+            }
+            // Add transitive deps from lock
+            if let Some(locked) = lock.dependencies.get(&key) {
+                if let Some(ref dep_keys) = locked.dependencies {
+                    for dk in dep_keys {
+                        if !visited_keys.contains(dk) {
+                            queue.push_back(dk.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        per_module.insert(name.clone(), module_jars);
     }
 
     Ok(per_module)
@@ -1455,5 +1530,152 @@ mod tests {
         let result = try_resolve_from_lock(&deps, Path::new("/tmp/cache"), &lock);
         // Empty lock returns None
         assert!(result.is_none());
+    }
+
+    // --- POM Cache tests ---
+
+    #[test]
+    fn test_pom_cache_insert_and_get() {
+        let cache = PomCache::new();
+        let deps = vec![
+            MavenCoord { group_id: "com.example".into(), artifact_id: "lib".into(), version: "1.0".into() },
+        ];
+        cache.insert("com.example:parent:1.0", &deps);
+        let cached = cache.get("com.example:parent:1.0");
+        assert!(cached.is_some());
+        let cached = cached.unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].group_id, "com.example");
+    }
+
+    #[test]
+    fn test_pom_cache_miss() {
+        let cache = PomCache::new();
+        assert!(cache.get("nonexistent:key:1.0").is_none());
+    }
+
+    // --- Workspace dep resolution tests ---
+
+    #[test]
+    fn test_resolve_workspace_deps_empty() {
+        let module_deps: Vec<(String, BTreeMap<String, String>)> = vec![
+            ("mod-a".into(), BTreeMap::new()),
+        ];
+        let mut lock = LockFile::default();
+        let result = resolve_workspace_deps(
+            &module_deps, Path::new("/tmp/cache"), &mut lock, &[], &[],
+        ).unwrap();
+        assert_eq!(result.get("mod-a").unwrap().len(), 0);
+    }
+
+    // --- MavenCoord clone test ---
+
+    #[test]
+    fn test_maven_coord_clone() {
+        let mc = MavenCoord::parse("org.example:lib", "1.0").unwrap();
+        let mc2 = mc.clone();
+        assert_eq!(mc.group_id, mc2.group_id);
+        assert_eq!(mc.artifact_id, mc2.artifact_id);
+        assert_eq!(mc.version, mc2.version);
+    }
+
+    // --- resolve_properties edge cases ---
+
+    #[test]
+    fn test_resolve_properties_deeply_nested() {
+        let mut props = HashMap::new();
+        props.insert("a".to_string(), "${b}".to_string());
+        props.insert("b".to_string(), "${c}".to_string());
+        props.insert("c".to_string(), "${d}".to_string());
+        props.insert("d".to_string(), "final_value".to_string());
+        // 4 levels of indirection
+        assert_eq!(resolve_properties("${a}", &props), "final_value");
+    }
+
+    #[test]
+    fn test_resolve_properties_circular_stops() {
+        let mut props = HashMap::new();
+        props.insert("a".to_string(), "${b}".to_string());
+        props.insert("b".to_string(), "${a}".to_string());
+        // Circular: should stop after 10 iterations, result will still contain ${...}
+        let result = resolve_properties("${a}", &props);
+        // Should not hang, and the result alternates between ${a} and ${b}
+        assert!(result.contains("${"));
+    }
+
+    // --- Import scope skipping in regular deps ---
+
+    #[test]
+    fn test_parse_pom_skips_import_scope() {
+        let pom = r#"<?xml version="1.0"?>
+<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-dependencies</artifactId>
+            <version>3.2.0</version>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</project>"#;
+        let props = HashMap::new();
+        let client = reqwest::blocking::Client::new();
+        let deps = parse_pom_dependencies_with_props(pom, &props, &client, Path::new("/tmp"), &[]).unwrap();
+        // import scope deps should be skipped in regular dependencies section
+        assert!(deps.is_empty());
+    }
+
+    // --- Managed version with parent-inherited version ---
+
+    #[test]
+    fn test_parse_pom_uses_parent_managed_version() {
+        let pom = r#"<?xml version="1.0"?>
+<project>
+    <dependencies>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>lib</artifactId>
+        </dependency>
+    </dependencies>
+</project>"#;
+        // Simulate parent providing managed version
+        let mut props = HashMap::new();
+        props.insert("managed:com.example:lib".to_string(), "3.0".to_string());
+        let client = reqwest::blocking::Client::new();
+        let deps = parse_pom_dependencies_with_props(pom, &props, &client, Path::new("/tmp"), &[]).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].version, "3.0");
+    }
+
+    // --- Multiple dependencies test ---
+
+    #[test]
+    fn test_parse_pom_multiple_deps() {
+        let pom = r#"<?xml version="1.0"?>
+<project>
+    <dependencies>
+        <dependency>
+            <groupId>com.a</groupId>
+            <artifactId>lib-a</artifactId>
+            <version>1.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.b</groupId>
+            <artifactId>lib-b</artifactId>
+            <version>2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.c</groupId>
+            <artifactId>lib-c</artifactId>
+            <version>3.0</version>
+            <scope>runtime</scope>
+        </dependency>
+    </dependencies>
+</project>"#;
+        let props = HashMap::new();
+        let client = reqwest::blocking::Client::new();
+        let deps = parse_pom_dependencies_with_props(pom, &props, &client, Path::new("/tmp"), &[]).unwrap();
+        // runtime scope is included (not test/provided/system/import)
+        assert_eq!(deps.len(), 3);
     }
 }
