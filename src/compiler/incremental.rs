@@ -104,7 +104,6 @@ impl Fingerprints {
     }
 
     /// Update ABI hash for a compiled class.
-    #[allow(dead_code)]
     pub fn update_abi(&mut self, source_path: &Path, abi_hash: &str) {
         let key = source_path.to_string_lossy().to_string();
         if let Some(entry) = self.entries.get_mut(&key) {
