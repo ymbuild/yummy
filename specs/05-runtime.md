@@ -93,17 +93,22 @@ ymc dev -- -Dspring.profiles.active=dev  # 传递 JVM 参数
 ymc dev <module>                         # 开发指定模块
 ```
 
-- 计算传递闭包，编译所有依赖模块
-- 构建组合 classpath（所有依赖模块的 `out/classes/` + Maven JAR）
-- 监听所有模块的源码目录
-- 任何文件变化 → 重新编译所有模块 → 重启
+### 细粒度增量重编译
+
+1. 构建 `src_to_module` 映射（源码目录 → 模块名称）
+2. 文件变化时，`identify_changed_modules()` 将变更文件映射到所属模块
+3. `recompile_affected_modules()` 按拓扑序传播：
+   - 直接变更的模块加入 affected 集合
+   - 遍历所有模块（拓扑序），如果依赖了 affected 中的模块则加入
+   - 仅按拓扑序重编译 affected 集合中的模块
+
+**示例：** 修改 `libs/core/src/Main.java` → 仅重编译 `core` 和依赖 `core` 的模块，跳过无关模块。
 
 ## 已知限制
 
 | 问题 | 影响 | 严重性 |
 |------|------|--------|
 | DCEVM 检测基于路径字符串 | 可能误检/漏检 | 低 |
-| 工作空间模式变更触发全量重编译 | 大项目慢 | 高 |
 | 热重载失败自动回退无配置 | 用户无法控制行为 | 低 |
 | JDWP 地址 `*` 绑定所有接口 | 安全风险 | 中 |
 | 多主类检测在 CI 中失败 | 非交互模式无法选择 | 中 |
@@ -111,19 +116,14 @@ ymc dev <module>                         # 开发指定模块
 
 ## 优化路线图
 
-### P0 — 工作空间细粒度增量
-
-当前：任意文件变化 → 重编译所有模块。
-目标：根据变更文件归属的模块，仅重编译该模块及其下游依赖。
-
-### P1 — DCEVM 检测改进
+### P0 — DCEVM 检测改进
 
 通过 `java -version` 输出检测 DCEVM/JBR，而非路径字符串。
 
-### P2 — Spring Boot DevTools 集成
+### P1 — Spring Boot DevTools 集成
 
 检测 `spring-boot-devtools` 依赖，自动配置 livereload 端口和 restart classloader。
 
-### P3 — 端口冲突检测
+### P2 — 端口冲突检测
 
 启动前检查 JDWP 端口和 agent 端口是否被占用。

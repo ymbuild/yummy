@@ -74,7 +74,7 @@ root/
 <component name="libraryTable">
   <library name="jackson-databind-2.19.0">
     <CLASSES>
-      <root url="jar://{absolute_path}!/" />
+      <root url="jar://{path}!/" />
     </CLASSES>
     <SOURCES>
       <root url="jar://{sources_jar_path}!/" />
@@ -82,6 +82,17 @@ root/
   </library>
 </component>
 ```
+
+### WSL 路径自适应
+
+在 WSL 环境中（通过 `/proc/version` 检测 "microsoft" 或 "wsl"），JAR 路径自动转换：
+
+| WSL 路径 | Windows 路径 |
+|----------|-------------|
+| `/mnt/c/Users/...` | `C:/Users/...` |
+| `/mnt/d/repos/...` | `D:/repos/...` |
+
+使用 `to_idea_path()` 函数处理，支持 `wslpath -w` 回退。
 
 ### Sources JAR 下载
 
@@ -95,26 +106,13 @@ root/
 | 问题 | 影响 | 严重性 |
 |------|------|--------|
 | JAR 路径为绝对路径 | 不可跨机器共享 .idea/ | 中 |
-| WSL 中生成的路径 Windows 不识别 | 跨环境开发不可用 | 高 |
-| 不支持注解处理器配置 | Lombok 等不生效 | 高 |
+| 不支持注解处理器配置生成 | Lombok 等在 IDEA 中不生效 | 高 |
 | 无 IDEA 插件 | 每次依赖变更需手动重跑 | 高 |
 | User-Agent 硬编码 `ym/0.1.0` | sources 下载标识过时 | 低 |
 
 ## 优化路线图
 
-### P0 — 路径格式自适应
-
-检测运行环境（WSL/native），生成对应格式的路径。WSL 中使用 `/mnt/c/...` → `C:\...` 转换。
-
-### P1 — IDEA 插件
-
-开发 IntelliJ 插件：
-- 读取 `package.json` 自动配置项目
-- 依赖变更时自动刷新（FileWatcher 监听 `package.json`）
-- 在 IDEA 内运行 `ym install` / `ymc build`
-- 与 IDEA 的 Run Configuration 集成
-
-### P2 — 注解处理器支持
+### P0 — 注解处理器支持
 
 生成 IDEA 的注解处理器配置（`.idea/compiler.xml`）：
 ```xml
@@ -127,6 +125,14 @@ root/
 </annotationProcessing>
 ```
 
-### P3 — VSCode 支持
+### P1 — IDEA 插件
+
+开发 IntelliJ 插件：
+- 读取 `package.json` 自动配置项目
+- 依赖变更时自动刷新（FileWatcher 监听 `package.json`）
+- 在 IDEA 内运行 `ym install` / `ymc build`
+- 与 IDEA 的 Run Configuration 集成
+
+### P2 — VSCode 支持
 
 生成 `.vscode/settings.json`，配置 Java Language Server 的 classpath。

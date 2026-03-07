@@ -36,6 +36,7 @@ monorepo/
   package-lock.json
   .ym/
     cache/maven/            ← 共享依赖缓存
+    pom-cache/              ← POM 解析结果缓存
     graph.json              ← 工作空间图缓存
   apps/
     web/
@@ -57,18 +58,37 @@ monorepo/
 
 ### 构建流程
 
-1. 从根 `package.json` 读取 `workspaces` glob 模式
-2. 扫描匹配目录中的 `package.json` 文件
-3. 构建 petgraph::DiGraph：
-   - 节点 = 模块（名称 + 路径 + 配置）
-   - 边 = `workspaceDependencies` 声明的依赖关系
-4. 验证无环（DAG）
+1. 尝试加载 `GraphCache`（`.ym/graph.json`）
+2. 缓存有效 → 从缓存恢复图
+3. 缓存无效 → 全新构建：
+   a. 从根 `package.json` 读取 `workspaces` glob 模式
+   b. 扫描匹配目录中的 `package.json` 文件
+   c. 构建 petgraph::DiGraph（节点 = 模块，边 = workspaceDependencies）
+   d. 验证无环（DAG）
+   e. 保存缓存
 
-### 缓存
+### 缓存（GraphCache）
 
 `.ym/graph.json` 缓存图结构：
-- 记录所有 `package.json` 的 mtime
-- 任何一个 `package.json` 变更 → 整个图失效重建
+
+```json
+{
+  "created_at": 1709856000,
+  "config_mtimes": {
+    "/path/to/apps/web/package.json": 1709855000,
+    "/path/to/libs/core/package.json": 1709854000
+  },
+  "packages": [
+    { "name": "web", "path": "/path/to/apps/web", "workspace_dependencies": ["core"] }
+  ],
+  "workspace_patterns": ["apps/*", "libs/*"],
+  "workspace_root": "/path/to/monorepo"
+}
+```
+
+**缓存失效条件：**
+- 任何已缓存的 `package.json` 的 mtime 发生变化
+- workspace glob 模式匹配到的文件数与缓存中的包数不同（新包出现或包被删除）
 
 ### 核心操作
 
@@ -77,6 +97,15 @@ monorepo/
 | `transitive_closure(target)` | 计算目标模块的所有依赖（Kahn 拓扑排序） |
 | `topological_levels()` | 按拓扑层级分组（同层可并行） |
 | `get_package(name)` | 获取模块信息 |
+
+## 工作空间级 Maven 依赖解析
+
+**不再逐模块解析。** 构建时：
+
+1. 收集所有模块的 `dependencies` + `devDependencies` → 合并去重
+2. 调用 `resolve_workspace_deps()` 一次性解析完整传递依赖图
+3. 遍历 lock file 依赖图，为每个模块筛选其直接依赖的传递闭包
+4. 返回 `HashMap<String, Vec<PathBuf>>`（模块名 → JAR 列表）
 
 ## 工作空间命令
 
@@ -148,27 +177,20 @@ ymc create my-service --deps             # 附带模板依赖
 
 | 问题 | 影响 | 严重性 |
 |------|------|--------|
-| 图缓存全量失效 | 单个 package.json 变更 → 重建整个图 | 中 |
-| 每个模块独立解析 Maven 依赖 | 2000 模块大量重复解析 | 高 |
 | foreach 无拓扑顺序保证 | 构建命令可能失序 | 中 |
 | 无模块版本管理 | workspace 内模块无独立发布版本 | 低 |
 | changed 仅基于 Git status | 不考虑传递影响 | 低 |
 
 ## 优化路线图
 
-### P0 — 增量图更新
-
-当前：任意 `package.json` mtime 变 → 完整重建图。
-目标：仅重新加载变更的模块节点，保持其余不变。
-
-### P1 — 工作空间级依赖合并
-
-收集所有模块的 Maven 依赖 → 合并去重 → 一次性解析 → 分发 JAR 路径。
-
-### P2 — foreach 拓扑排序
+### P0 — foreach 拓扑排序
 
 `--parallel` 模式下按拓扑层级执行，保证依赖先于消费者。
 
-### P3 — 受影响模块检测
+### P1 — 受影响模块检测
 
 `changed` 命令结合 `impact` 分析，输出真正需要重编译/重测的模块集。
+
+### P2 — 模块版本管理
+
+支持 workspace 内模块独立版本号，`publish` 时发布指定模块。
