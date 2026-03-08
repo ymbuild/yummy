@@ -92,8 +92,8 @@ impl AgentClient {
     }
 }
 
-/// Embedded ym-agent.jar bytes (7KB)
-const AGENT_JAR_BYTES: &[u8] = include_bytes!("../../ym-agent/ym-agent.jar");
+/// Embedded ym-agent.jar bytes (7KB), compiled from source by build.rs
+const AGENT_JAR_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ym-agent.jar"));
 
 /// Find or extract the ym-agent.jar.
 /// Checks standard locations first, then extracts the embedded jar to ~/.ym/.

@@ -13,5 +13,9 @@ out/
 # Test projects
 gpg-test/
 
+# Build artifacts (compiled by build.rs from source)
+ym-agent/ym-agent.jar
+ym-agent/out/
+
 # Logs
 *.log
