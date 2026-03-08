@@ -1,5 +1,17 @@
+# Rust build
 /target/
+
+# Yummy internal cache & build output
 .ym/
 out/
 *.class
+
+# IDE
 .idea/
+*.iml
+
+# Test projects
+gpg-test/
+
+# Logs
+*.log
