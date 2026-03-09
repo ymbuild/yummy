@@ -1,15 +1,20 @@
 use anyhow::Result;
 use console::style;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::workspace::graph::WorkspaceGraph;
 
-pub fn execute(target: Option<String>, download_sources: bool) -> Result<()> {
+pub fn execute(target: Option<String>, download_sources: bool, json: bool) -> Result<()> {
     let (config_path, cfg) = config::load_or_find_config()?;
     let project = config::project_dir(&config_path);
 
     let java_version = cfg.target.as_deref().unwrap_or("21");
+
+    if json {
+        return execute_json(&project, &cfg, target.as_deref(), java_version);
+    }
 
     if cfg.workspaces.is_some() {
         let ws = WorkspaceGraph::build(&project)?;
@@ -44,6 +49,241 @@ pub fn execute(target: Option<String>, download_sources: bool) -> Result<()> {
 
     println!("  Open this directory in IntelliJ IDEA to get started.");
     Ok(())
+}
+
+// ============================================================
+//  --json output: structured project model for External System
+// ============================================================
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IdeaProjectModel {
+    name: String,
+    group_id: String,
+    version: String,
+    jdk_version: String,
+    #[serde(rename = "type")]
+    project_type: String, // "single" or "workspace"
+    modules: Vec<IdeaModuleModel>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IdeaModuleModel {
+    name: String,
+    path: String,
+    source_folders: Vec<IdeaSourceFolder>,
+    output_path: String,
+    test_output_path: String,
+    dependencies: Vec<IdeaDependency>,
+    annotation_processors: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IdeaSourceFolder {
+    path: String,
+    #[serde(rename = "type")]
+    folder_type: String, // SOURCE, TEST, RESOURCE, TEST_RESOURCE
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IdeaDependency {
+    #[serde(rename = "type")]
+    dep_type: String, // "library" or "module"
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jar_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
+    scope: String, // COMPILE, RUNTIME, PROVIDED, TEST
+}
+
+fn execute_json(
+    project: &Path,
+    cfg: &config::schema::YmConfig,
+    target: Option<&str>,
+    java_version: &str,
+) -> Result<()> {
+    let modules = if cfg.workspaces.is_some() {
+        let ws = WorkspaceGraph::build(project)?;
+        let packages = if let Some(t) = target {
+            ws.transitive_closure(t)?
+        } else {
+            let mut all = ws.all_packages();
+            all.sort();
+            all
+        };
+        build_modules_workspace(project, &packages, &ws)?
+    } else {
+        vec![build_module_single(project, cfg)?]
+    };
+
+    let model = IdeaProjectModel {
+        name: cfg.name.clone(),
+        group_id: cfg.group_id.clone(),
+        version: cfg.version.as_deref().unwrap_or("0.0.0").to_string(),
+        jdk_version: java_version.to_string(),
+        project_type: if cfg.workspaces.is_some() { "workspace" } else { "single" }.to_string(),
+        modules,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&model)?);
+    Ok(())
+}
+
+fn build_modules_workspace(
+    _root: &Path,
+    packages: &[String],
+    ws: &WorkspaceGraph,
+) -> Result<Vec<IdeaModuleModel>> {
+    let mut modules = Vec::new();
+    for pkg_name in packages {
+        let pkg = ws.get_package(pkg_name).unwrap();
+        let jars = super::build::resolve_deps(&pkg.path, &pkg.config)?;
+        let ap_jars = collect_annotation_processor_jars(&pkg.config, &jars);
+        let ws_deps = pkg.config.workspace_module_deps();
+
+        let mut dependencies = Vec::new();
+        // Module dependencies
+        for dep in &ws_deps {
+            dependencies.push(IdeaDependency {
+                dep_type: "module".to_string(),
+                name: dep.clone(),
+                jar_path: None,
+                source_path: None,
+                scope: "COMPILE".to_string(),
+            });
+        }
+        // Library dependencies
+        for jar in &jars {
+            let jar_name = jar.file_stem().unwrap().to_string_lossy().to_string();
+            let scope = jar_to_idea_scope_str(jar, &pkg.config);
+            let source_path = find_sources_jar(jar);
+            dependencies.push(IdeaDependency {
+                dep_type: "library".to_string(),
+                name: jar_name,
+                jar_path: Some(to_idea_path(&jar.to_string_lossy())),
+                source_path,
+                scope,
+            });
+        }
+
+        modules.push(IdeaModuleModel {
+            name: pkg_name.clone(),
+            path: to_idea_path(&pkg.path.to_string_lossy()),
+            source_folders: detect_source_folders_structured(&pkg.path),
+            output_path: "out/classes".to_string(),
+            test_output_path: "out/test-classes".to_string(),
+            dependencies,
+            annotation_processors: ap_jars.iter()
+                .map(|j| to_idea_path(&j.to_string_lossy()))
+                .collect(),
+        });
+    }
+    Ok(modules)
+}
+
+fn build_module_single(
+    project: &Path,
+    cfg: &config::schema::YmConfig,
+) -> Result<IdeaModuleModel> {
+    let jars = super::build::resolve_deps(project, cfg)?;
+    let ap_jars = collect_annotation_processor_jars(cfg, &jars);
+
+    let mut dependencies = Vec::new();
+    for jar in &jars {
+        let jar_name = jar.file_stem().unwrap().to_string_lossy().to_string();
+        let scope = jar_to_idea_scope_str(jar, cfg);
+        let source_path = find_sources_jar(jar);
+        dependencies.push(IdeaDependency {
+            dep_type: "library".to_string(),
+            name: jar_name,
+            jar_path: Some(to_idea_path(&jar.to_string_lossy())),
+            source_path,
+            scope,
+        });
+    }
+
+    Ok(IdeaModuleModel {
+        name: cfg.name.clone(),
+        path: to_idea_path(&project.to_string_lossy()),
+        source_folders: detect_source_folders_structured(project),
+        output_path: "out/classes".to_string(),
+        test_output_path: "out/test-classes".to_string(),
+        dependencies,
+        annotation_processors: ap_jars.iter()
+            .map(|j| to_idea_path(&j.to_string_lossy()))
+            .collect(),
+    })
+}
+
+/// Return the IDEA scope string for a JAR: COMPILE, RUNTIME, PROVIDED, TEST
+fn jar_to_idea_scope_str(jar: &Path, cfg: &config::schema::YmConfig) -> String {
+    let jar_stem = jar.file_stem().unwrap_or_default().to_string_lossy();
+    if let Some(ref deps) = cfg.dependencies {
+        for (key, value) in deps {
+            if !key.contains(':') { continue; }
+            let artifact_id = key.split(':').last().unwrap_or("");
+            if jar_stem.starts_with(artifact_id) {
+                return match value.scope() {
+                    "runtime" => "RUNTIME",
+                    "provided" => "PROVIDED",
+                    "test" => "TEST",
+                    _ => "COMPILE",
+                }.to_string();
+            }
+        }
+    }
+    "COMPILE".to_string()
+}
+
+/// Check if -sources.jar exists next to the main JAR
+fn find_sources_jar(jar: &Path) -> Option<String> {
+    let sources_jar = jar.with_file_name(
+        jar.file_stem()?.to_string_lossy().to_string() + "-sources.jar",
+    );
+    if sources_jar.exists() {
+        Some(to_idea_path(&sources_jar.to_string_lossy()))
+    } else {
+        None
+    }
+}
+
+/// Structured source folder detection for JSON output
+fn detect_source_folders_structured(project: &Path) -> Vec<IdeaSourceFolder> {
+    let mut folders = Vec::new();
+
+    let maven_src = project.join("src").join("main").join("java");
+    if maven_src.exists() {
+        folders.push(IdeaSourceFolder { path: "src/main/java".to_string(), folder_type: "SOURCE".to_string() });
+    } else if project.join("src").exists() {
+        folders.push(IdeaSourceFolder { path: "src".to_string(), folder_type: "SOURCE".to_string() });
+    }
+
+    let maven_res = project.join("src").join("main").join("resources");
+    if maven_res.exists() {
+        folders.push(IdeaSourceFolder { path: "src/main/resources".to_string(), folder_type: "RESOURCE".to_string() });
+    }
+
+    let maven_test = project.join("src").join("test").join("java");
+    if maven_test.exists() {
+        folders.push(IdeaSourceFolder { path: "src/test/java".to_string(), folder_type: "TEST".to_string() });
+    } else if project.join("test").exists() {
+        folders.push(IdeaSourceFolder { path: "test".to_string(), folder_type: "TEST".to_string() });
+    }
+
+    let maven_test_res = project.join("src").join("test").join("resources");
+    if maven_test_res.exists() {
+        folders.push(IdeaSourceFolder { path: "src/test/resources".to_string(), folder_type: "TEST_RESOURCE".to_string() });
+    }
+
+    if folders.is_empty() {
+        folders.push(IdeaSourceFolder { path: "src".to_string(), folder_type: "SOURCE".to_string() });
+    }
+
+    folders
 }
 
 fn generate_idea_project(

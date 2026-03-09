@@ -524,6 +524,7 @@ fn count_files_with_ext(dir: &std::path::Path, ext: &str) -> usize {
         .count()
 }
 
+#[allow(unused_variables)]
 fn check_permissions(fix: bool) {
     // Check ~/.ym/credentials.json permissions (should be 0o600)
     let home = std::env::var("HOME").unwrap_or_default();
