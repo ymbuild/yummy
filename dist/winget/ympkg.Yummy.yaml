@@ -1,0 +1,14 @@
+PackageIdentifier: ympkg.Yummy
+PackageVersion: 0.3.0
+PackageName: Yummy
+Publisher: ympkg
+License: MIT
+ShortDescription: Modern Java build tool - Gradle replacement with Yarn + Vite experience
+PackageUrl: https://github.com/ympkg/yummy
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/ympkg/yummy/releases/download/v0.3.0/ym-0.3.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: PLACEHOLDER_SHA256
+    InstallerType: zip
+ManifestType: singleton
+ManifestVersion: 1.6.0

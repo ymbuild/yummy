@@ -1,0 +1,59 @@
+name: Update Distribution Channels
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-homebrew:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
+    if: "!github.event.release.prerelease"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get release info
+        id: info
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download and compute SHA256
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            curl -fsSL "https://github.com/ympkg/yummy/releases/download/v${VERSION}/ym-${VERSION}-${target}.tar.gz" -o "${target}.tar.gz"
+            sha256sum "${target}.tar.gz" | cut -d' ' -f1 > "${target}.sha256"
+          done
+
+      - name: Update formula from template
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          cp dist/homebrew/ym.rb ym-updated.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" ym-updated.rb
+          sed -i "s/PLACEHOLDER_SHA256_LINUX_X64/$(cat x86_64-unknown-linux-gnu.sha256)/" ym-updated.rb
+          sed -i "s/PLACEHOLDER_SHA256_LINUX_ARM64/$(cat aarch64-unknown-linux-gnu.sha256)/" ym-updated.rb
+          cat ym-updated.rb
+
+  update-winget:
+    name: Update winget Manifest
+    runs-on: ubuntu-latest
+    if: "!github.event.release.prerelease"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install komac
+        run: |
+          curl -fsSL https://github.com/russellbanks/Komac/releases/latest/download/komac-2-x86_64-unknown-linux-gnu -o komac
+          chmod +x komac
+
+      - name: Submit to winget-pkgs
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          ./komac update ympkg.Yummy --version "$VERSION" \
+            --urls "https://github.com/ympkg/yummy/releases/download/v${VERSION}/ym-${VERSION}-x86_64-pc-windows-msvc.zip" \
+            --submit
+        env:
+          KOMAC_TOKEN: ${{ secrets.WINGET_TOKEN }}
