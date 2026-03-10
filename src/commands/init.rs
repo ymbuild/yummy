@@ -56,7 +56,7 @@ fn execute_defaults(dir: &Path) -> Result<()> {
         version: Some("0.1.0".to_string()),
         target: Some("21".to_string()),
         package: Some(pkg.clone()),
-        main: Some(format!("{}.Main", pkg)),
+        main: Some(format!("{}.Application", pkg)),
         dependencies: Some(BTreeMap::new()),
         scripts: Some(default_scripts()),
         ..Default::default()
@@ -67,7 +67,7 @@ fn execute_defaults(dir: &Path) -> Result<()> {
     // Run postinit hook if defined
     crate::scripts::run_script(&config, "postinit", dir)?;
 
-    let main_class = config.main.as_deref().unwrap_or("Main");
+    let main_class = config.main.as_deref().unwrap_or("Application");
     let main_path = main_class.replace('.', "/");
     println!();
     println!("  {} Created package.toml", style("✓").green());
@@ -173,7 +173,7 @@ fn execute_interactive(dir: &Path) -> Result<()> {
         }
         _ => {
             // app (default)
-            config.main = Some(format!("{}.Main", pkg_input));
+            config.main = Some(format!("{}.Application", pkg_input));
         }
     }
 
@@ -502,7 +502,7 @@ fn execute_from_template(dir: &Path, template: &str) -> Result<()> {
         }
         _ => {
             // "app" default
-            config.main = Some(format!("{}.Main", pkg));
+            config.main = Some(format!("{}.Application", pkg));
         }
     }
 
@@ -859,7 +859,7 @@ fn to_class_name(name: &str) -> String {
 }
 
 fn create_sample_main(src_dir: &Path, config: &YmConfig) -> Result<()> {
-    let main_class = config.main.as_deref().unwrap_or("Main");
+    let main_class = config.main.as_deref().unwrap_or("Application");
 
     let (pkg, class_name) = if let Some(idx) = main_class.rfind('.') {
         (Some(&main_class[..idx]), &main_class[idx + 1..])
