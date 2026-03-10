@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::config;
 use crate::hotreload;
+use crate::resources;
 use crate::scripts;
 use crate::watcher::FileWatcher;
 use crate::workspace::graph::WorkspaceGraph;
@@ -21,11 +22,13 @@ pub fn execute(
     let (config_path, cfg) = config::load_or_find_config()?;
     let project = config::project_dir(&config_path);
 
+    super::idea::auto_sync_idea(&project, &cfg);
+
     // Ensure JDK is available
     super::build::ensure_jdk_for_config(&cfg)?;
 
     // Run predev script
-    scripts::run_script(&cfg.scripts, &cfg.env, "predev", &project)?;
+    scripts::run_script(&cfg, "predev", &project)?;
 
     if cfg.workspaces.is_some() {
         let target = target.as_deref().unwrap_or_else(|| {
@@ -34,14 +37,9 @@ pub fn execute(
         });
         let result = dev_workspace(&project, target);
         // Run postdev script
-        scripts::run_script(&cfg.scripts, &cfg.env, "postdev", &project)?;
+        scripts::run_script(&cfg, "postdev", &project)?;
         return result;
     }
-
-    let display_name = target.as_deref().unwrap_or(&cfg.name);
-    println!();
-    println!("  {} {}", style("ymc dev").bold(), display_name);
-    println!();
 
     // Resolve dependencies (auto-download all, then scope-filter)
     let start = Instant::now();
@@ -56,7 +54,7 @@ pub fn execute(
     let ws_count = cfg.workspace_module_deps().len();
 
     println!(
-        "  {} Resolved dependencies ({} workspace + {} maven)     {:>4}ms",
+        "  {} resolved dependencies ({} workspace + {} maven) {:>4}ms",
         style("✓").green(),
         ws_count,
         dep_count,
@@ -73,10 +71,21 @@ pub fn execute(
         bail!("Compilation failed");
     }
 
+    // Copy resources (same as build command)
+    let src = config::source_dir(&project);
+    let out = config::output_classes_dir(&project);
+    let custom_res_ext = cfg.compiler.as_ref().and_then(|c| c.resource_extensions.as_ref());
+    resources::copy_resources_with_extensions(&src, &out, custom_res_ext.map(|v| v.as_slice()))?;
+
+    let resources_dir = project.join("src").join("main").join("resources");
+    if resources_dir.exists() {
+        resources::copy_resources_with_extensions(&resources_dir, &out, custom_res_ext.map(|v| v.as_slice()))?;
+    }
+
     println!(
-        "  {} Compiled {} ({} files)                         {:>6}ms",
-        style("✓").green(),
-        style(&cfg.name).bold(),
+        "{} {} ({} files) {:>27}ms",
+        style(format!("{:>12}", "Compiling")).green().bold(),
+        &cfg.name,
         result.files_compiled,
         compile_time.as_millis()
     );
@@ -126,9 +135,14 @@ pub fn execute(
     }
 
     // Enable enhanced class redefinition on JBR (DCEVM built-in)
-    // Detect via JAVA_HOME path or java -version output
+    // DCEVM enhances Instrumentation.redefineClasses() to support structural changes,
+    // which directly powers ym-agent L1 hot reload (add/remove methods and fields).
     if !jvm_args.iter().any(|a| a.contains("AllowEnhancedClassRedefinition")) && detect_dcevm() {
         jvm_args.push("-XX:+AllowEnhancedClassRedefinition".to_string());
+        println!(
+            "  {} DCEVM enabled (enhanced hot reload)",
+            style("✓").green(),
+        );
     }
 
     // Spring Boot DevTools: auto-configure if devtools JAR is on classpath
@@ -194,7 +208,8 @@ pub fn execute(
     let file_count = count_source_files(&src_dir, &watch_extensions);
 
     println!(
-        "  Watching {} source files for changes...",
+        "  {} watching {} source files...",
+        style("➜").green(),
         style(file_count).cyan()
     );
     println!();
@@ -204,21 +219,17 @@ pub fn execute(
     let result = dev_watch_loop(watcher, &mut child, &main_class, &classpath, &jvm_args, &project, &cfg, &compile_jars, agent_port);
 
     // Run postdev script
-    scripts::run_script(&cfg.scripts, &cfg.env, "postdev", &project)?;
+    scripts::run_script(&cfg, "postdev", &project)?;
 
     result
 }
 
 fn dev_workspace(root: &std::path::Path, target: &str) -> Result<()> {
-    println!();
-    println!("  {} {}", style("ymc dev").bold(), target);
-    println!();
-
     let ws = WorkspaceGraph::build(root)?;
     let packages = ws.transitive_closure(target)?;
 
     let start = Instant::now();
-    super::build::execute(Some(target.to_string()), false)?;
+    super::build::compile_only(Some(target.to_string()))?;
     let _build_time = start.elapsed();
 
     let mut classpath = Vec::new();
@@ -263,7 +274,8 @@ fn dev_workspace(root: &std::path::Path, target: &str) -> Result<()> {
         .sum();
 
     println!(
-        "  Watching {} source files for changes...",
+        "  {} watching {} source files...",
+        style("➜").green(),
         style(file_count).cyan()
     );
     println!();
@@ -302,7 +314,7 @@ fn dev_workspace(root: &std::path::Path, target: &str) -> Result<()> {
 
         let compile_start = Instant::now();
         let build_ok = if changed_modules.is_empty() {
-            super::build::execute(Some(target.to_string()), false).is_ok()
+            super::build::compile_only(Some(target.to_string())).is_ok()
         } else {
             recompile_affected_modules(&changed_modules, &packages, &ws, &classpath)
         };
@@ -318,7 +330,7 @@ fn dev_workspace(root: &std::path::Path, target: &str) -> Result<()> {
                 changed_modules.join(", ")
             };
             println!(
-                "  {} Recompiled [{}] ({}ms) -> Restarted {}",
+                "  {} recompiled [{}] ({}ms) -> restarted {}",
                 style(&now).dim(),
                 module_info,
                 compile_time.as_millis(),
@@ -466,7 +478,7 @@ fn dev_watch_loop(
                     match client.reload(&out_dir, &class_names) {
                         Ok(reload_result) if reload_result.success => {
                             println!(
-                                "  {} Compiled {} file(s) ({}ms) -> {} {}",
+                                "  {} compiled {} file(s) ({}ms) -> {} {}",
                                 style(&now).dim(),
                                 result.files_compiled,
                                 compile_time.as_millis(),
@@ -500,7 +512,7 @@ fn dev_watch_loop(
         *child = start_java_process(main_class, classpath, jvm_args)?;
 
         println!(
-            "  {} Compiled {} file(s) ({}ms) -> Restarted {}",
+            "  {} compiled {} file(s) ({}ms) -> restarted {}",
             style(&now).dim(),
             result.files_compiled,
             compile_time.as_millis(),
@@ -592,22 +604,36 @@ fn start_java_process(
     }
     cmd.arg("-cp").arg(&cp).arg(main_class);
 
+    // Create a new process group so we can kill the entire tree on stop
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
     let child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start Java process: {}", e))?;
 
     Ok(child)
 }
 
-/// Gracefully stop a Java process: SIGTERM → 5s timeout → SIGKILL.
+/// Gracefully stop a Java process: SIGTERM entire process group → 5s timeout → SIGKILL.
 fn graceful_stop(child: &mut std::process::Child) {
+    // Already exited
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
     #[cfg(unix)]
     {
-        // Send SIGTERM via kill command
-        let pid = child.id();
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
+        let pid = child.id() as i32;
+        // Send SIGTERM to entire process group (negative PID)
+        unsafe { libc::kill(-pid, libc::SIGTERM); }
         // Wait up to 5 seconds
         for _ in 0..50 {
             if child.try_wait().ok().flatten().is_some() {
@@ -615,13 +641,17 @@ fn graceful_stop(child: &mut std::process::Child) {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        // Force kill
-        let _ = child.kill();
+        // Force kill entire process group
+        unsafe { libc::kill(-pid, libc::SIGKILL); }
         let _ = child.wait();
     }
     #[cfg(not(unix))]
     {
-        let _ = child.kill();
+        // /T kills the entire process tree
+        let pid = child.id();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status();
         let _ = child.wait();
     }
 }
