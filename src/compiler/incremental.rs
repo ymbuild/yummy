@@ -455,11 +455,20 @@ pub fn incremental_compile(
         }
         all_files.clone()
     } else if changed.is_empty() {
-        return Ok(super::CompileResult {
-            success: true,
-            files_compiled: 0,
-            errors: String::new(),
-        });
+        // Check for missing .class files (e.g. user deleted out/classes/ contents)
+        let missing: Vec<PathBuf> = all_files
+            .iter()
+            .filter(|src| find_class_for_source(src, &config.source_dirs, &config.output_dir).is_none())
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(super::CompileResult {
+                success: true,
+                files_compiled: 0,
+                errors: String::new(),
+            });
+        }
+        missing
     } else {
         changed.clone()
     };
