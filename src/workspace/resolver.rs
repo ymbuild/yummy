@@ -1650,23 +1650,70 @@ pub fn fetch_latest_version(group_id: &str, artifact_id: &str) -> Result<String>
         .user_agent(concat!("ym/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
+    // Try 1: Solr search API (fast, but index may lag for new packages)
     let url = format!(
         "https://search.maven.org/solrsearch/select?q=g:\"{}\" AND a:\"{}\"&rows=1&wt=json",
         group_id, artifact_id
     );
 
-    let response = client.get(&url).send()?;
-    let body: serde_json::Value = response.json()?;
+    if let Ok(response) = client.get(&url).send() {
+        if let Ok(body) = response.json::<serde_json::Value>() {
+            if let Some(docs) = body["response"]["docs"].as_array() {
+                if let Some(doc) = docs.first() {
+                    if let Some(v) = doc["latestVersion"].as_str() {
+                        return Ok(v.to_string());
+                    }
+                }
+            }
+        }
+    }
 
-    if let Some(docs) = body["response"]["docs"].as_array() {
-        if let Some(doc) = docs.first() {
-            if let Some(v) = doc["latestVersion"].as_str() {
-                return Ok(v.to_string());
+    // Try 2: Direct maven-metadata.xml (reliable, works for all published packages)
+    let metadata_url = format!(
+        "https://repo1.maven.org/maven2/{}/{}/maven-metadata.xml",
+        group_id.replace('.', "/"),
+        artifact_id
+    );
+
+    if let Ok(response) = client.get(&metadata_url).send() {
+        if response.status().is_success() {
+            if let Ok(text) = response.text() {
+                // Parse <release>version</release> or last <version> in <versions>
+                if let Some(v) = extract_xml_value(&text, "release") {
+                    return Ok(v);
+                }
+                // Fallback: get last <version> entry
+                let mut last_version = None;
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("<version>") && trimmed.ends_with("</version>") {
+                        last_version = Some(
+                            trimmed
+                                .strip_prefix("<version>")
+                                .unwrap()
+                                .strip_suffix("</version>")
+                                .unwrap()
+                                .to_string(),
+                        );
+                    }
+                }
+                if let Some(v) = last_version {
+                    return Ok(v);
+                }
             }
         }
     }
 
     bail!("Could not find {}:{} on Maven Central", group_id, artifact_id)
+}
+
+fn extract_xml_value(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    let val = text[start..end].trim();
+    if val.is_empty() { None } else { Some(val.to_string()) }
 }
 
 #[cfg(test)]
