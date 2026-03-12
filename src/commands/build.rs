@@ -859,10 +859,17 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
                 };
                 let name = entry.name().to_string();
 
-                // Skip META-INF/MANIFEST.MF (we write our own) and unsafe paths
+                // Skip META-INF/MANIFEST.MF (we write our own), signature files
+                // (cause SecurityException in fat JARs), and unsafe paths
                 if name == "META-INF/MANIFEST.MF"
                     || name.starts_with('/')
                     || name.contains("..")
+                    || (name.starts_with("META-INF/") && (
+                        name.ends_with(".SF")
+                        || name.ends_with(".DSA")
+                        || name.ends_with(".RSA")
+                        || name.ends_with(".EC")
+                    ))
                 {
                     continue;
                 }
