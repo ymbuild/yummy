@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     if: "!github.event.release.prerelease"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Get release info
         id: info
@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     if: "!github.event.release.prerelease"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install komac
         run: |
