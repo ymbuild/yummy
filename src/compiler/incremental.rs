@@ -630,6 +630,11 @@ fn compute_build_cache_key(config: &super::CompileConfig, source_files: &[PathBu
         hasher.update(b"arg:");
         hasher.update(arg.as_bytes());
     }
+    // Annotation processor jars affect compilation output
+    for ap in &config.annotation_processors {
+        hasher.update(b"ap:");
+        hasher.update(crate::normalize_cache_path(ap).as_bytes());
+    }
 
     Ok(format!("{:x}", hasher.finalize()))
 }
