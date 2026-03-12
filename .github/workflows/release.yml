@@ -5,8 +5,10 @@ on:
     branches: [main]
     paths:
       - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'src/**'
       - 'ym-agent/**'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 permissions:
