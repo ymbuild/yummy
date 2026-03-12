@@ -388,6 +388,26 @@ impl YmConfig {
                 }
             }
         }
+        // Environment variables: ${env.VAR_NAME}
+        if result.contains("${env.") {
+            result = Self::resolve_env_vars(&result);
+        }
+        result
+    }
+
+    /// Resolve `${env.VAR_NAME}` placeholders with environment variable values.
+    fn resolve_env_vars(s: &str) -> String {
+        let mut result = s.to_string();
+        while let Some(start) = result.find("${env.") {
+            let rest = &result[start + 6..];
+            if let Some(end) = rest.find('}') {
+                let var_name = &rest[..end];
+                let value = std::env::var(var_name).unwrap_or_default();
+                result = result.replace(&format!("${{env.{}}}", var_name), &value);
+            } else {
+                break;
+            }
+        }
         result
     }
 
@@ -683,13 +703,20 @@ impl YmConfig {
         crate::compiler::incremental::hash_bytes(data.as_bytes())
     }
 
-    /// Get registry entries with scope routing info
+    /// Get registry entries with scope routing info.
+    /// Registry URLs support `${env.VAR_NAME}` for environment variable substitution.
     pub fn registry_entries(&self) -> Vec<crate::workspace::resolver::RegistryEntry> {
         let mut entries = Vec::new();
         if let Some(ref registries) = self.registries {
             for value in registries.values() {
+                let url = value.url();
+                let resolved_url = if url.contains("${env.") {
+                    Self::resolve_env_vars(url)
+                } else {
+                    url.to_string()
+                };
                 entries.push(crate::workspace::resolver::RegistryEntry {
-                    url: value.url().to_string(),
+                    url: resolved_url,
                     scope: value.scope().map(|s| s.to_string()),
                 });
             }
