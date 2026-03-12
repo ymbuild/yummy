@@ -8,7 +8,7 @@ use crate::compiler;
 use crate::compiler::incremental;
 use crate::compiler::javac;
 use crate::config;
-use crate::config::schema::YmConfig;
+use crate::config::schema::{YmConfig, artifact_id_from_key};
 use crate::jvm;
 use crate::resources;
 use crate::scripts;
@@ -1818,9 +1818,11 @@ fn resolve_annotation_processors(project: &Path, cfg: &YmConfig, classpath: &[Pa
             let cache = config::maven_cache_dir(project);
             let mut jars = Vec::new();
             for coord in coords {
-                if let Some(version) = deps.get(coord) {
+                // Resolve @scope/name to groupId:artifactId for lookup
+                let resolved = cfg.resolve_key(coord);
+                if let Some(version) = deps.get(&resolved) {
                     // Direct version available — resolve from cache
-                    let mc = crate::workspace::resolver::MavenCoord::parse(coord, version)?;
+                    let mc = crate::workspace::resolver::MavenCoord::parse(&resolved, version)?;
                     let jar = mc.jar_path(&cache);
                     if jar.exists() {
                         jars.push(jar);
@@ -1828,7 +1830,7 @@ fn resolve_annotation_processors(project: &Path, cfg: &YmConfig, classpath: &[Pa
                 } else {
                     // Workspace-inherited dep: version not in local maven_dependencies().
                     // Fall back to searching the already-resolved classpath by artifactId.
-                    let artifact_id = coord.split(':').nth(1).unwrap_or(coord);
+                    let artifact_id = artifact_id_from_key(coord);
                     if let Some(jar) = classpath.iter().find(|p| {
                         p.file_name()
                             .and_then(|f| f.to_str())
