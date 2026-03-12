@@ -74,7 +74,7 @@ jobs:
       - name: Build ym-agent.jar
         run: |
           mkdir -p ym-agent/out
-          javac -d ym-agent/out ym-agent/src/main/java/dev/yummy/agent/*.java
+          javac -d ym-agent/out ym-agent/src/main/java/sh/yummy/agent/*.java
           jar cfm ym-agent/ym-agent.jar ym-agent/src/main/resources/META-INF/MANIFEST.MF -C ym-agent/out .
 
       - uses: actions/upload-artifact@v6

@@ -1,4 +1,4 @@
-package dev.yummy.agent;
+package sh.yummy.agent;
 
 import java.io.*;
 import java.lang.instrument.ClassDefinition;

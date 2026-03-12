@@ -1,4 +1,4 @@
-package dev.yummy.agent;
+package sh.yummy.agent;
 
 import java.io.IOException;
 import java.net.URL;
@@ -28,7 +28,7 @@ public class YummyClassLoader extends URLClassLoader {
     private static final String[] PARENT_FIRST_PACKAGES = {
         "java.", "javax.", "sun.", "jdk.",
         "org.slf4j.", "org.apache.logging.",
-        "dev.yummy.agent."
+        "sh.yummy.agent."
     };
 
     public YummyClassLoader(URL[] urls, ClassLoader parent) {
