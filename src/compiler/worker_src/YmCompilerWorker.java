@@ -74,6 +74,10 @@ public class YmCompilerWorker {
                 List<File> apFiles = Arrays.stream(processorPath.split(File.pathSeparator))
                     .map(File::new).collect(Collectors.toList());
                 fm.setLocation(StandardLocation.ANNOTATION_PROCESSOR_PATH, apFiles);
+            } else {
+                // No annotation processors — set empty processor path to prevent
+                // auto-discovery from classpath (equivalent to -proc:none)
+                fm.setLocation(StandardLocation.ANNOTATION_PROCESSOR_PATH, Collections.emptyList());
             }
 
             // Build compiler options (only flags, not paths)

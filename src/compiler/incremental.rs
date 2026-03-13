@@ -813,6 +813,8 @@ fn compile_with_javac(
             .collect::<Vec<_>>()
             .join(sep);
         cmd.arg("-processorpath").arg(&ap);
+    } else {
+        cmd.arg("-proc:none");
     }
 
     // Lint options (-Xlint)

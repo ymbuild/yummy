@@ -66,6 +66,11 @@ pub fn compile(config: &CompileConfig) -> Result<CompileResult> {
             .collect::<Vec<_>>()
             .join(sep);
         cmd.arg("-processorpath").arg(&ap);
+    } else {
+        // No annotation processors declared — disable processor discovery from classpath
+        // to prevent compile-scope jars with META-INF/services/javax.annotation.processing.Processor
+        // from being accidentally loaded (e.g. auto-service via selenium).
+        cmd.arg("-proc:none");
     }
 
     for lint_opt in &config.lint {

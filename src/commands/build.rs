@@ -1867,34 +1867,40 @@ fn resolve_annotation_processors(project: &Path, cfg: &YmConfig, classpath: &[Pa
         }
     }
 
-    Ok(discover_annotation_processors(classpath))
+    // Auto-discover: only look in devDependencies jars (like Gradle's annotationProcessor config).
+    // This prevents compile-scope jars (e.g. auto-service via selenium) from being accidentally
+    // loaded as annotation processors when their own dependencies aren't on the processor path.
+    let dev_artifact_ids = collect_dev_dependency_artifact_ids(cfg);
+    if dev_artifact_ids.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(discover_annotation_processors_from_dev_deps(classpath, &dev_artifact_ids))
 }
 
-fn discover_annotation_processors(classpath: &[PathBuf]) -> Vec<PathBuf> {
+/// Collect artifact IDs from devDependencies for annotation processor filtering.
+fn collect_dev_dependency_artifact_ids(cfg: &YmConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(ref dev_deps) = cfg.dev_dependencies {
+        for key in dev_deps.keys() {
+            ids.push(artifact_id_from_key(key).to_string());
+        }
+    }
+    ids
+}
+
+/// Discover annotation processors only from jars that match devDependencies artifact IDs.
+fn discover_annotation_processors_from_dev_deps(classpath: &[PathBuf], dev_artifact_ids: &[String]) -> Vec<PathBuf> {
     classpath
         .iter()
         .filter(|jar| {
+            let fname = jar.file_name().and_then(|f| f.to_str()).unwrap_or("");
             jar.extension().and_then(|e| e.to_str()) == Some("jar")
                 && jar.exists()
-                && !is_framework_jar(jar)
+                && dev_artifact_ids.iter().any(|id| fname.starts_with(id.as_str()))
                 && has_annotation_processor(jar)
         })
         .cloned()
         .collect()
-}
-
-/// Check if a JAR is a known framework/library that should be excluded
-/// from annotation processor auto-discovery (even if it has a Processor service file).
-fn is_framework_jar(jar: &Path) -> bool {
-    let stem = jar.file_stem().unwrap_or_default().to_string_lossy();
-    let stem_lower = stem.to_lowercase();
-    // Exclude JUnit, SLF4J, Log4j, Spring (non-processor), common test/logging frameworks
-    const EXCLUDE_PREFIXES: &[&str] = &[
-        "junit-", "junit5-", "org.junit", "hamcrest",
-        "slf4j-", "log4j-", "logback-", "commons-logging",
-        "mockito-", "assertj-", "byte-buddy",
-    ];
-    EXCLUDE_PREFIXES.iter().any(|prefix| stem_lower.starts_with(prefix))
 }
 
 pub fn has_annotation_processor(jar_path: &Path) -> bool {
