@@ -691,14 +691,27 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
             let pkg = ws.get_package(jar_target).unwrap();
             let closure = ws.transitive_closure(jar_target)?;
             let mut all_deps = Vec::new();
-            crate::RESOLVER_QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+            let ws_module_names: std::collections::HashSet<String> = closure.iter()
+                .map(|n| n.to_string())
+                .collect();
+
+            // Package workspace modules as thin JARs (like Gradle's jar task).
+            // This avoids class/resource duplication between BOOT-INF/classes/ and BOOT-INF/lib/.
+            let effective_version = pkg.config.version.as_deref()
+                .or(root_cfg.version.as_deref())
+                .unwrap_or("0.0.0");
             for pkg_name in &closure {
                 let p = ws.get_package(pkg_name).unwrap();
                 if pkg_name != *jar_target {
-                    all_deps.push(config::output_classes_dir(&p.path));
+                    let thin_jar = package_thin_jar(&p.path, &p.config, effective_version)?;
+                    all_deps.push(thin_jar);
                 }
-                // Resolve each workspace module's external Maven deps (e.g. @aws/ec2)
-                // so they're included in the fat JAR / Spring Boot JAR
+            }
+
+            // Resolve all workspace modules' external Maven deps
+            crate::RESOLVER_QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+            for pkg_name in &closure {
+                let p = ws.get_package(pkg_name).unwrap();
                 let module_jars = resolve_deps_with_scopes(&p.path, &p.config, &["compile", "runtime"])?;
                 all_deps.extend(module_jars);
             }
@@ -706,9 +719,25 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
             let runtime_jars = resolve_deps_with_scopes(&pkg.path, &pkg.config, &["compile", "runtime"])?;
             crate::RESOLVER_QUIET.store(false, std::sync::atomic::Ordering::Relaxed);
             all_deps.extend(runtime_jars);
-            // Deduplicate: same JAR path might appear from multiple modules
+
+            // Deduplicate and remove published JARs that duplicate workspace modules
             all_deps.sort();
             all_deps.dedup();
+            all_deps.retain(|path| {
+                if path.is_dir() { return true; }
+                let file_name = path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                for module_name in &ws_module_names {
+                    if file_name.starts_with(&format!("{}-", module_name))
+                        && file_name.ends_with(".jar")
+                        && !file_name.contains(".thin.") // keep our thin JARs
+                    {
+                        return false;
+                    }
+                }
+                true
+            });
 
             let class_dir = config::output_classes_dir(&pkg.path);
             let resource_dir = pkg.path.join("src").join("main").join("resources");
@@ -1206,6 +1235,59 @@ pub fn build_with_plugins(
 /// Resolve plugin classpath: extract plugin dependencies from devDependencies,
 /// resolve their full transitive dependency tree via ym's Maven resolver,
 /// and return the complete classpath string.
+/// Package a workspace module's compiled classes + resources into a thin JAR.
+/// Similar to Gradle's `jar` task. Output: <module>/out/release/<name>.thin.<version>.jar
+fn package_thin_jar(project: &Path, cfg: &config::schema::YmConfig, version: &str) -> Result<PathBuf> {
+    let classes_dir = config::output_classes_dir(project);
+    let jar_name = format!("{}.thin.{}.jar", cfg.name, version);
+    let release_dir = project.join("out").join("release");
+    std::fs::create_dir_all(&release_dir)?;
+    let jar_path = release_dir.join(&jar_name);
+
+    // Skip if up-to-date (thin JAR newer than classes dir)
+    if jar_path.exists() {
+        let jar_mtime = std::fs::metadata(&jar_path).and_then(|m| m.modified()).ok();
+        let classes_mtime = walkdir::WalkDir::new(&classes_dir)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| e.metadata().ok()?.modified().ok())
+            .max();
+        if let (Some(jm), Some(cm)) = (jar_mtime, classes_mtime) {
+            if jm >= cm {
+                return Ok(jar_path);
+            }
+        }
+    }
+
+    let jar_file = std::fs::File::create(&jar_path)?;
+    let mut zos = zip::ZipWriter::new(std::io::BufWriter::new(jar_file));
+    let zip_options = zip::write::SimpleFileOptions::default();
+
+    // Add classes
+    if classes_dir.exists() {
+        for entry in walkdir::WalkDir::new(&classes_dir) {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(&classes_dir)?;
+            let name = relative.to_string_lossy().replace('\\', "/");
+            if name.is_empty() { continue; }
+
+            if entry.file_type().is_dir() {
+                let dir_name = if name.ends_with('/') { name } else { format!("{}/", name) };
+                zos.add_directory(dir_name, zip_options)?;
+            } else {
+                zos.start_file(&name, zip_options)?;
+                let mut f = std::fs::File::open(path)?;
+                std::io::copy(&mut f, &mut zos)?;
+            }
+        }
+    }
+
+    zos.finish()?;
+    Ok(jar_path)
+}
+
 fn resolve_plugin_classpath(project: &Path, cfg: &YmConfig) -> Result<String> {
     // Build a config that contains only plugin-related devDependencies
     let mut plugin_cfg = cfg.clone();
