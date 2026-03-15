@@ -1457,14 +1457,18 @@ fn repos_for_group_id(registries: &[RegistryEntry], group_id: &str) -> Vec<Strin
 }
 
 /// Check if a groupId matches a scope pattern.
+/// Supports comma-separated patterns: "com.mycompany.*,sh.yummy.*"
 /// Pattern "com.mycompany.*" matches groupId starting with "com.mycompany."
 /// Pattern "com.mycompany" matches exactly "com.mycompany"
 fn matches_scope(group_id: &str, pattern: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix(".*") {
-        group_id == prefix || group_id.starts_with(&format!("{}.", prefix))
-    } else {
-        group_id == pattern
-    }
+    pattern.split(',').any(|p| {
+        let p = p.trim();
+        if let Some(prefix) = p.strip_suffix(".*") {
+            group_id == prefix || group_id.starts_with(&format!("{}.", prefix))
+        } else {
+            group_id == p
+        }
+    })
 }
 
 /// Try to download an artifact from scope-routed repos, stopping at the first success.
