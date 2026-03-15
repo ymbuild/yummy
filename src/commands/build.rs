@@ -1194,73 +1194,47 @@ pub fn build_with_plugins(
     Ok(())
 }
 
-/// Resolve plugin classpath from devDependencies (artifacts containing "yummy-plugin").
-/// Automatically includes yummy-plugin-api as a transitive dependency.
-fn resolve_plugin_classpath(_project: &Path, cfg: &YmConfig) -> Result<String> {
-    let home = crate::home_dir();
-    let mut cp_parts: Vec<String> = Vec::new();
+/// Resolve plugin classpath: extract plugin dependencies from devDependencies,
+/// resolve their full transitive dependency tree via ym's Maven resolver,
+/// and return the complete classpath string.
+fn resolve_plugin_classpath(project: &Path, cfg: &YmConfig) -> Result<String> {
+    // Build a config that contains only plugin-related devDependencies
+    let mut plugin_cfg = cfg.clone();
+    let mut plugin_deps = std::collections::BTreeMap::new();
 
-    let all_deps = [&cfg.dependencies, &cfg.dev_dependencies];
-    for deps_opt in &all_deps {
-        if let Some(deps) = deps_opt {
-            for (key, _value) in deps.iter() {
-                let artifact_id = artifact_id_from_key(key);
-                if artifact_id.contains("yummy-plugin") {
-                    if let Some(path) = find_artifact_jar(&home, "sh.yummy", &artifact_id) {
-                        cp_parts.push(path.to_string_lossy().to_string());
-                    } else {
-                        eprintln!(
-                            "{} plugin JAR not found: {} ({})",
-                            style(format!("{:>12}", "warning")).yellow().bold(),
-                            key, artifact_id
-                        );
-                    }
-                }
+    if let Some(ref dev_deps) = cfg.dev_dependencies {
+        for (key, value) in dev_deps {
+            let artifact_id = artifact_id_from_key(key);
+            if artifact_id.contains("yummy-plugin") {
+                plugin_deps.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if let Some(ref deps) = cfg.dependencies {
+        for (key, value) in deps {
+            let artifact_id = artifact_id_from_key(key);
+            if artifact_id.contains("yummy-plugin") {
+                plugin_deps.insert(key.clone(), value.clone());
             }
         }
     }
 
-    // Ensure yummy-plugin-api is on classpath (transitive dep of all plugins)
-    let has_api = cp_parts.iter().any(|p| p.contains("yummy-plugin-api"));
-    if !has_api {
-        if let Some(path) = find_artifact_jar(&home, "sh.yummy", "yummy-plugin-api") {
-            cp_parts.push(path.to_string_lossy().to_string());
-        }
+    if plugin_deps.is_empty() {
+        return Ok(String::new());
     }
 
-    Ok(cp_parts.join(":"))
+    // Use ym's standard dependency resolver to get the full transitive classpath
+    plugin_cfg.dependencies = Some(plugin_deps);
+    plugin_cfg.dev_dependencies = None;
+    let jars = resolve_deps_with_scopes(project, &plugin_cfg, &["compile", "runtime"])?;
+
+    Ok(jars.iter()
+        .filter(|j| j.exists())
+        .map(|j| j.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(":"))
 }
 
-/// 查找 artifact 的 JAR 或 classes 目录。
-/// 优先查 Maven 缓存（~/.ym/caches/<groupId>/<artifactId>/<version>/），
-/// 回退到本地开发目录。
-fn find_artifact_jar(home: &Path, group_id: &str, artifact_id: &str) -> Option<PathBuf> {
-    // 1. Maven 缓存
-    let cache_dir = home.join(".ym").join("caches").join(group_id).join(artifact_id);
-    if cache_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-            // 取最新版本（按目录名排序）
-            let mut versions: Vec<_> = entries.flatten().collect();
-            versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-            for entry in versions {
-                let jar = entry.path().join(format!("{}-{}.jar",
-                    artifact_id, entry.file_name().to_string_lossy()));
-                if jar.exists() { return Some(jar); }
-            }
-        }
-    }
-
-    // 2. 本地开发目录（约定 /mnt/d/code/ympkg/<artifact_id>/out/classes）
-    // 通过 ym 自身的安装路径推断
-    let dev_candidates = [
-        PathBuf::from(format!("/mnt/d/code/ympkg/{}/out/classes", artifact_id)),
-    ];
-    for path in &dev_candidates {
-        if path.exists() { return Some(path.clone()); }
-    }
-
-    None
-}
 
 /// Compute a fingerprint for packaging inputs (class files, dependencies, resources, config).
 /// If all inputs are unchanged and the output JAR exists, packaging can be skipped.
