@@ -1194,20 +1194,19 @@ pub fn build_with_plugins(
     Ok(())
 }
 
-/// 解析插件 classpath：从 plugins 字段找到所有插件 JAR，加上 ym-api JAR。
-/// 从 devDependencies 中查找所有插件 JAR（名称含 yummy-plugin），加上 ym-api
+/// Resolve plugin classpath from devDependencies (artifacts containing "yummy-plugin").
+/// Automatically includes yummy-plugin-api as a transitive dependency.
 fn resolve_plugin_classpath(_project: &Path, cfg: &YmConfig) -> Result<String> {
     let home = crate::home_dir();
     let mut cp_parts: Vec<String> = Vec::new();
 
-    // 从 devDependencies 中找插件（和 Vite 一样，插件就是 devDependency）
     let all_deps = [&cfg.dependencies, &cfg.dev_dependencies];
     for deps_opt in &all_deps {
         if let Some(deps) = deps_opt {
             for (key, _value) in deps.iter() {
                 let artifact_id = artifact_id_from_key(key);
-                if artifact_id.contains("yummy-plugin") || artifact_id.contains("ym-api") {
-                    if let Some(path) = find_artifact_jar(&home, "com.ympkg", &artifact_id) {
+                if artifact_id.contains("yummy-plugin") {
+                    if let Some(path) = find_artifact_jar(&home, "sh.yummy", &artifact_id) {
                         cp_parts.push(path.to_string_lossy().to_string());
                     } else {
                         eprintln!(
@@ -1221,10 +1220,10 @@ fn resolve_plugin_classpath(_project: &Path, cfg: &YmConfig) -> Result<String> {
         }
     }
 
-    // 确保 ym-api 在 classpath 中
-    let has_api = cp_parts.iter().any(|p| p.contains("ym-api"));
+    // Ensure yummy-plugin-api is on classpath (transitive dep of all plugins)
+    let has_api = cp_parts.iter().any(|p| p.contains("yummy-plugin-api"));
     if !has_api {
-        if let Some(path) = find_artifact_jar(&home, "com.ympkg", "ym-api") {
+        if let Some(path) = find_artifact_jar(&home, "sh.yummy", "yummy-plugin-api") {
             cp_parts.push(path.to_string_lossy().to_string());
         }
     }
