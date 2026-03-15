@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use console::style;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -266,7 +266,11 @@ fn build_impl(targets: Vec<String>, package: bool, keep_going: bool) -> Result<(
                 size_str,
             );
         } else {
-            build_release_jar(&project, &cfg, &runtime_jars, None, None)?;
+            if project.join("ym.config.java").exists() {
+                build_with_plugins(&project, &cfg, &runtime_jars, None)?;
+            } else {
+                build_release_jar(&project, &cfg, &runtime_jars, None, None)?;
+            }
             save_packaging_fingerprint(&project, &fp)?;
         }
     }
@@ -720,7 +724,11 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
                     size_str,
                 );
             } else {
-                build_release_jar(&pkg.path, &pkg.config, &all_deps, None, root_cfg.version.as_deref())?;
+                if pkg.path.join("ym.config.java").exists() {
+                    build_with_plugins(&pkg.path, &pkg.config, &all_deps, root_cfg.version.as_deref())?;
+                } else {
+                    build_release_jar(&pkg.path, &pkg.config, &all_deps, None, root_cfg.version.as_deref())?;
+                }
                 save_packaging_fingerprint(&pkg.path, &fp)?;
             }
         }
@@ -1050,6 +1058,210 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
     Ok(())
 }
 
+
+/// 通过插件系统执行打包。
+/// 解析 plugins，下载插件 JAR，启动 JVM 执行 ConfigRunner，
+/// 由插件决定如何打包（Spring Boot JAR、fat JAR 等）。
+pub fn build_with_plugins(
+    project: &Path,
+    cfg: &YmConfig,
+    runtime_jars: &[PathBuf],
+    root_version: Option<&str>,
+) -> Result<()> {
+    let out = config::output_classes_dir(project);
+    let resources_dir = project.join("src").join("main").join("resources");
+    let effective_version = cfg.version.as_deref()
+        .or(root_version)
+        .unwrap_or("0.0.0");
+    let jar_name = format!("{}-{}.jar", cfg.name, effective_version);
+
+    println!(
+        "{} {} (plugins)",
+        style(format!("{:>12}", "Packaging")).green().bold(),
+        jar_name,
+    );
+
+    // 收集插件 JAR 的 classpath
+    let plugin_cp = resolve_plugin_classpath(project, cfg)?;
+    if plugin_cp.is_empty() {
+        bail!("No plugin JARs found. Ensure plugins are installed.");
+    }
+
+    // runtime classpath 字符串
+    let runtime_cp: String = runtime_jars.iter()
+        .filter(|j| j.exists())
+        .map(|j| j.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+
+    // java 可执行文件
+    let java_home = jvm::ensure_jdk(cfg.target.as_deref().unwrap_or("25"), None, false)?;
+    let java = if java_home.as_os_str() == "system" {
+        PathBuf::from("java")
+    } else {
+        java_home.join("bin").join("java")
+    };
+
+    // ym.json 序列化为临时文件，传给 ConfigRunner
+    let config_json_path = project.join("out").join(".ym-config.json");
+    if let Some(parent) = config_json_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let config_json = serde_json::to_string(cfg)?;
+    std::fs::write(&config_json_path, &config_json)?;
+
+    let pack_start = Instant::now();
+
+    // 检查是否有 ym.config.java，复制为合法文件名后编译
+    let ym_config_java = project.join("ym.config.java");
+    let mut extra_cp = String::new();
+    if ym_config_java.exists() {
+        let config_out = project.join("out").join(".ym-config-classes");
+        std::fs::create_dir_all(&config_out)?;
+
+        // ym.config.java → YmConfig.java（合法 Java 文件名）
+        let temp_source = config_out.join("YmConfig.java");
+        std::fs::copy(&ym_config_java, &temp_source)?;
+
+        let javac = if java_home.as_os_str() == "system" {
+            PathBuf::from("javac")
+        } else {
+            java_home.join("bin").join("javac")
+        };
+        let javac_status = std::process::Command::new(&javac)
+            .arg("--enable-preview")
+            .arg("--source").arg("25")
+            .arg("-cp").arg(&plugin_cp)
+            .arg("-d").arg(&config_out)
+            .arg(&temp_source)
+            .status()?;
+        if !javac_status.success() {
+            bail!("Failed to compile ym.config.java");
+        }
+        extra_cp = format!(":{}", config_out.display());
+    }
+
+    // 调用 ym.internal.ConfigRunner
+    let full_cp = format!("{}{}", plugin_cp, extra_cp);
+    let status = std::process::Command::new(&java)
+        .arg("--enable-preview")
+        .arg("-cp").arg(&full_cp)
+        .arg(format!("-Dym.project.dir={}", project.display()))
+        .arg(format!("-Dym.config.json={}", config_json_path.display()))
+        .arg(format!("-Dym.runtime.classpath={}", runtime_cp))
+        .arg(format!("-Dym.project.name={}", cfg.name))
+        .arg(format!("-Dym.project.version={}", effective_version))
+        .arg("ym.internal.ConfigRunner")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .with_context(|| "Failed to start JVM for plugin execution")?;
+
+    if !status.status.success() {
+        bail!("Plugin execution failed (exit code: {})", status.status.code().unwrap_or(-1));
+    }
+
+    // 解析 Build Plan JSON（stdout）
+    let build_plan = String::from_utf8_lossy(&status.stdout);
+    eprintln!(
+        "{} Build Plan received ({} bytes)",
+        style(format!("{:>12}", "Plugins")).cyan().bold(),
+        build_plan.len()
+    );
+
+    // TODO: 解析 Build Plan JSON，执行 Task DAG
+    // 当前阶段：直接交给插件 Task 在 JVM 中执行完成
+    // 后续：ym 核心解析 DAG 并调度
+
+    let pack_elapsed = pack_start.elapsed();
+    let output_jar = project.join("out").join("release").join(&jar_name);
+    if output_jar.exists() {
+        let jar_size = std::fs::metadata(&output_jar).map(|m| m.len()).unwrap_or(0);
+        let size_str = if jar_size >= 1024 * 1024 {
+            format!("{:.1} MB", jar_size as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.0} KB", jar_size as f64 / 1024.0)
+        };
+        println!(
+            "{} {} ({}) {:>22}ms",
+            style(format!("{:>12}", "Packaged")).green().bold(),
+            jar_name,
+            size_str,
+            pack_elapsed.as_millis()
+        );
+    }
+
+    Ok(())
+}
+
+/// 解析插件 classpath：从 plugins 字段找到所有插件 JAR，加上 ym-api JAR。
+/// 从 devDependencies 中查找所有插件 JAR（名称含 yummy-plugin），加上 ym-api
+fn resolve_plugin_classpath(_project: &Path, cfg: &YmConfig) -> Result<String> {
+    let home = crate::home_dir();
+    let mut cp_parts: Vec<String> = Vec::new();
+
+    // 从 devDependencies 中找插件（和 Vite 一样，插件就是 devDependency）
+    let all_deps = [&cfg.dependencies, &cfg.dev_dependencies];
+    for deps_opt in &all_deps {
+        if let Some(deps) = deps_opt {
+            for (key, _value) in deps.iter() {
+                let artifact_id = artifact_id_from_key(key);
+                if artifact_id.contains("yummy-plugin") || artifact_id.contains("ym-api") {
+                    if let Some(path) = find_artifact_jar(&home, "com.ympkg", &artifact_id) {
+                        cp_parts.push(path.to_string_lossy().to_string());
+                    } else {
+                        eprintln!(
+                            "{} plugin JAR not found: {} ({})",
+                            style(format!("{:>12}", "warning")).yellow().bold(),
+                            key, artifact_id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 确保 ym-api 在 classpath 中
+    let has_api = cp_parts.iter().any(|p| p.contains("ym-api"));
+    if !has_api {
+        if let Some(path) = find_artifact_jar(&home, "com.ympkg", "ym-api") {
+            cp_parts.push(path.to_string_lossy().to_string());
+        }
+    }
+
+    Ok(cp_parts.join(":"))
+}
+
+/// 查找 artifact 的 JAR 或 classes 目录。
+/// 优先查 Maven 缓存（~/.ym/caches/<groupId>/<artifactId>/<version>/），
+/// 回退到本地开发目录。
+fn find_artifact_jar(home: &Path, group_id: &str, artifact_id: &str) -> Option<PathBuf> {
+    // 1. Maven 缓存
+    let cache_dir = home.join(".ym").join("caches").join(group_id).join(artifact_id);
+    if cache_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+            // 取最新版本（按目录名排序）
+            let mut versions: Vec<_> = entries.flatten().collect();
+            versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            for entry in versions {
+                let jar = entry.path().join(format!("{}-{}.jar",
+                    artifact_id, entry.file_name().to_string_lossy()));
+                if jar.exists() { return Some(jar); }
+            }
+        }
+    }
+
+    // 2. 本地开发目录（约定 /mnt/d/code/ympkg/<artifact_id>/out/classes）
+    // 通过 ym 自身的安装路径推断
+    let dev_candidates = [
+        PathBuf::from(format!("/mnt/d/code/ympkg/{}/out/classes", artifact_id)),
+    ];
+    for path in &dev_candidates {
+        if path.exists() { return Some(path.clone()); }
+    }
+
+    None
+}
 
 /// Compute a fingerprint for packaging inputs (class files, dependencies, resources, config).
 /// If all inputs are unchanged and the output JAR exists, packaging can be skipped.
