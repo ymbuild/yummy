@@ -552,6 +552,7 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
         if compilable.is_empty() { continue; }
 
         let cp_snapshot = workspace_classpath.clone();
+        let root_cfg_snapshot = root_cfg.clone();
 
         let results: Vec<_> = compilable
             .par_iter()
@@ -574,7 +575,16 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
                 let jars = per_module_jars.get(pkg_name.as_str()).cloned().unwrap_or_default();
                 let mut classpath = jars;
                 classpath.extend(cp_snapshot.clone());
-                let result = compile_project_with_pool(&pkg.path, &pkg.config, &classpath, worker_pool.as_ref());
+                // Inherit compiler args from workspace root if module doesn't specify them
+                let mut module_cfg = pkg.config.clone();
+                if module_cfg.compiler.as_ref().and_then(|c| c.args.as_ref()).is_none() {
+                    let root_args = root_cfg_snapshot.compiler.as_ref().and_then(|c| c.args.clone());
+                    if let Some(args) = root_args {
+                        let compiler = module_cfg.compiler.get_or_insert_with(Default::default);
+                        compiler.args = Some(args);
+                    }
+                }
+                let result = compile_project_with_pool(&pkg.path, &module_cfg, &classpath, worker_pool.as_ref());
                 (pkg_name.to_string(), result, start.elapsed())
             })
             .collect();
@@ -2182,7 +2192,15 @@ pub fn compile_project(
     let ap_jars = resolve_annotation_processors(project, cfg, classpath)?;
 
     let lint = cfg.compiler.as_ref().and_then(|c| c.lint.clone()).unwrap_or_default();
-    let mut extra_args = cfg.compiler.as_ref().and_then(|c| c.args.clone()).unwrap_or_default();
+    let mut extra_args = cfg.compiler.as_ref().and_then(|c| c.args.clone()).unwrap_or_else(|| {
+        // Inherit compiler args from workspace root if not specified in module
+        if let Some(ws_root) = config::find_workspace_root(project) {
+            if let Ok(root_cfg) = config::load_config(&ws_root.join(config::CONFIG_FILE)) {
+                return root_cfg.compiler.as_ref().and_then(|c| c.args.clone()).unwrap_or_default();
+            }
+        }
+        Vec::new()
+    });
 
     if is_strict() && !extra_args.iter().any(|a| a == "-Werror") {
         extra_args.push("-Werror".to_string());
@@ -2229,7 +2247,14 @@ pub fn compile_project_with_pool(
     let encoding = cfg.compiler.as_ref().and_then(|c| c.encoding.clone());
     let ap_jars = resolve_annotation_processors(project, cfg, classpath)?;
     let lint = cfg.compiler.as_ref().and_then(|c| c.lint.clone()).unwrap_or_default();
-    let mut extra_args = cfg.compiler.as_ref().and_then(|c| c.args.clone()).unwrap_or_default();
+    let mut extra_args = cfg.compiler.as_ref().and_then(|c| c.args.clone()).unwrap_or_else(|| {
+        if let Some(ws_root) = config::find_workspace_root(project) {
+            if let Ok(root_cfg) = config::load_config(&ws_root.join(config::CONFIG_FILE)) {
+                return root_cfg.compiler.as_ref().and_then(|c| c.args.clone()).unwrap_or_default();
+            }
+        }
+        Vec::new()
+    });
     if is_strict() && !extra_args.iter().any(|a| a == "-Werror") {
         extra_args.push("-Werror".to_string());
     }
