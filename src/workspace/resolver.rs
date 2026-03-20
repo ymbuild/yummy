@@ -417,7 +417,7 @@ fn resolve_inner(
     let exclusion_set: HashSet<String> = exclusions.iter().cloned().collect();
     // Fast path: try to resolve entirely from lock file + local cache
     if resolutions.is_empty() {
-        if let Some(jars) = try_resolve_from_lock(dependencies, cache_dir, lock) {
+        if let Some(jars) = try_resolve_from_lock(dependencies, cache_dir, lock, &exclusion_set) {
             return Ok(jars);
         }
     } else {
@@ -428,7 +428,7 @@ fn resolve_inner(
                 resolved_deps.insert(k.clone(), v.clone());
             }
         }
-        if let Some(jars) = try_resolve_from_lock(&resolved_deps, cache_dir, lock) {
+        if let Some(jars) = try_resolve_from_lock(&resolved_deps, cache_dir, lock, &exclusion_set) {
             return Ok(jars);
         }
     }
@@ -917,6 +917,7 @@ fn try_resolve_from_lock(
     dependencies: &BTreeMap<String, String>,
     cache_dir: &Path,
     lock: &ResolvedCache,
+    exclusion_set: &HashSet<String>,
 ) -> Option<Vec<PathBuf>> {
     if lock.dependencies.is_empty() {
         return None;
@@ -939,6 +940,11 @@ fn try_resolve_from_lock(
     }
 
     while let Some(coord) = queue.pop_front() {
+        let ga_key = format!("{}:{}", coord.group_id, coord.artifact_id);
+        if exclusion_set.contains(&ga_key) {
+            continue;
+        }
+
         let key = coord.versioned_key();
         if visited.contains(&key) {
             continue;
@@ -2542,7 +2548,7 @@ mod tests {
     fn test_try_resolve_from_lock_empty() {
         let deps = BTreeMap::new();
         let lock = ResolvedCache::default();
-        let result = try_resolve_from_lock(&deps, Path::new("/tmp/cache"), &lock);
+        let result = try_resolve_from_lock(&deps, Path::new("/tmp/cache"), &lock, &HashSet::new());
         // Empty lock returns None
         assert!(result.is_none());
     }
