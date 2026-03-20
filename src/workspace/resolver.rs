@@ -37,6 +37,22 @@ fn resolver_progress(msg: &str) {
     }
 }
 
+/// Check if a pom-only marker exists and is still valid (within 7-day TTL).
+fn is_pom_only_cached(jar_path: &Path) -> bool {
+    let marker = jar_path.with_extension("jar.pom-only");
+    match std::fs::read_to_string(&marker) {
+        Ok(content) => {
+            let created: u64 = content.trim().parse().unwrap_or(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            now.saturating_sub(created) < 7 * 24 * 3600
+        }
+        Err(_) => false,
+    }
+}
+
 /// Current platform classifier for native JAR detection (e.g. "linux-x86_64").
 fn platform_classifier() -> &'static str {
     if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
@@ -484,9 +500,9 @@ fn resolve_inner(
             ordered_keys.push(key.clone());
             resolved_versions.entry(ga_key).or_insert((current_depth, coord.version.clone()));
 
-            // Queue JAR download if not cached
+            // Queue JAR download if not cached and not known pom-only
             let jar_path = coord.jar_path(cache_dir);
-            if !jar_path.exists() {
+            if !jar_path.exists() && !is_pom_only_cached(&jar_path) {
                 coords_to_download.push((key, coord.clone()));
             } else {
                 // Still need to record the key for lock file
@@ -804,6 +820,20 @@ fn resolve_inner(
                     if msg.contains("HTTP 404") {
                         // POM-only artifact (e.g. kotlin-stdlib-common merged into kotlin-stdlib in Kotlin 2.x).
                         // POM exists but JAR doesn't — skip gracefully.
+                        // Create pom-only marker so future runs skip download attempt.
+                        if let Some(coord) = MavenCoord::from_versioned_key(&key) {
+                            let jar_path = coord.jar_path(cache_dir);
+                            let marker = jar_path.with_extension("jar.pom-only");
+                            if let Some(parent) = marker.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                                .to_string();
+                            let _ = std::fs::write(&marker, timestamp);
+                        }
                         eprintln!("{} {} (pom-only, no JAR — skipped)", style(format!("{:>12}", "Skipping")).yellow().bold(), key);
                     } else {
                         failures.push(format!("{}: {}", key, e));
@@ -822,7 +852,11 @@ fn resolve_inner(
         let Some(coord) = MavenCoord::from_versioned_key(key) else {
             continue;
         };
-        all_jars.push(coord.jar_path(cache_dir));
+        let jar_path = coord.jar_path(cache_dir);
+        // Skip pom-only artifacts (no JAR to add to classpath)
+        if jar_path.exists() {
+            all_jars.push(jar_path);
+        }
 
         let dep_keys = dep_map.remove(key).unwrap_or_default();
         let effective_scope = scope_map.get(key).cloned();
@@ -911,9 +945,10 @@ fn try_resolve_from_lock(
         }
         visited.insert(key.clone());
 
-        // Check JAR exists in cache
+        // Check JAR exists in cache (or is known pom-only)
         let jar_path = coord.jar_path(cache_dir);
-        if !jar_path.exists() {
+        let pom_only = is_pom_only_cached(&jar_path);
+        if !jar_path.exists() && !pom_only {
             return None; // Cache miss
         }
 
@@ -923,7 +958,9 @@ fn try_resolve_from_lock(
         // SHA-256 was already verified at download time; skip re-verification
         // to avoid reading hundreds of MBs of JARs on every build.
 
-        all_jars.push(jar_path);
+        if !pom_only {
+            all_jars.push(jar_path);
+        }
         if let Some(ref dep_keys) = locked.dependencies {
             for dep_key in dep_keys {
                 if let Some(mc) = MavenCoord::from_versioned_key(dep_key) {

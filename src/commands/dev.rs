@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use console::style;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -183,9 +184,12 @@ pub fn execute(
         None
     };
 
+    // Load .env files
+    let dotenv = load_dotenv(&project);
+
     // Start the Java process
     let run_start = Instant::now();
-    let mut child = start_java_process(&main_class, &classpath, &jvm_args)?;
+    let mut child = start_java_process(&main_class, &classpath, &jvm_args, &dotenv)?;
     let run_time = run_start.elapsed();
 
     println!(
@@ -215,7 +219,7 @@ pub fn execute(
 
     let watcher = FileWatcher::new(&[src_dir], watch_extensions)?;
 
-    let result = dev_watch_loop(watcher, &mut child, &main_class, &classpath, &jvm_args, &project, &cfg, &compile_jars, agent_port);
+    let result = dev_watch_loop(watcher, &mut child, &main_class, &classpath, &jvm_args, &dotenv, &project, &cfg, &compile_jars, agent_port);
 
     // Run postdev script
     scripts::run_script(&cfg, "postdev", &project)?;
@@ -254,8 +258,11 @@ fn dev_workspace(root: &std::path::Path, target: &str) -> Result<()> {
     let main_class = resolve_main_class(&target_pkg.config, &target_pkg.path, None)?;
     let jvm_args = target_pkg.config.jvm_args.clone().unwrap_or_default();
 
+    // Load .env files from target package directory
+    let dotenv = load_dotenv(&target_pkg.path);
+
     let run_start = Instant::now();
-    let mut child = start_java_process(&main_class, &classpath, &jvm_args)?;
+    let mut child = start_java_process(&main_class, &classpath, &jvm_args, &dotenv)?;
     let run_time = run_start.elapsed();
 
     println!(
@@ -321,7 +328,7 @@ fn dev_workspace(root: &std::path::Path, target: &str) -> Result<()> {
 
         if build_ok {
             graceful_stop(&mut child);
-            child = start_java_process(&main_class, &classpath, &jvm_args)?;
+            child = start_java_process(&main_class, &classpath, &jvm_args, &dotenv)?;
 
             let module_info = if changed_modules.is_empty() {
                 "all".to_string()
@@ -418,6 +425,7 @@ fn dev_watch_loop(
     main_class: &str,
     classpath: &[std::path::PathBuf],
     jvm_args: &[String],
+    dotenv: &HashMap<String, String>,
     project: &std::path::Path,
     cfg: &config::schema::YmConfig,
     jars: &[std::path::PathBuf],
@@ -508,7 +516,7 @@ fn dev_watch_loop(
         // Fall back to restart
         graceful_stop(child);
 
-        *child = start_java_process(main_class, classpath, jvm_args)?;
+        *child = start_java_process(main_class, classpath, jvm_args, dotenv)?;
 
         println!(
             "  {} compiled {} file(s) ({}ms) -> restarted {}",
@@ -584,11 +592,41 @@ fn find_main_classes(src_dir: &std::path::Path) -> Vec<String> {
     result
 }
 
+/// Load .env files from the given directory.
+/// Files loaded in order: .env, .env.development (later overrides earlier).
+fn load_dotenv(dir: &std::path::Path) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for name in &[".env", ".env.development"] {
+        let path = dir.join(name);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let mut count = 0;
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    env.insert(key.trim().to_string(), value.trim().to_string());
+                    count += 1;
+                }
+            }
+            println!(
+                "  {} Loaded {} ({} vars)",
+                style("✓").green(),
+                name,
+                count
+            );
+        }
+    }
+    env
+}
+
 /// Start a Java process
 fn start_java_process(
     main_class: &str,
     classpath: &[std::path::PathBuf],
     jvm_args: &[String],
+    env: &HashMap<String, String>,
 ) -> Result<std::process::Child> {
     let cp = classpath
         .iter()
@@ -597,6 +635,7 @@ fn start_java_process(
         .join(if cfg!(windows) { ";" } else { ":" });
 
     let mut cmd = std::process::Command::new("java");
+    cmd.envs(env);
     for arg in jvm_args {
         cmd.arg(arg);
     }
