@@ -851,8 +851,356 @@ fn print_compile_result(name: &str, result: &compiler::CompileResult, elapsed: s
     }
 }
 
-/// Build a fat/executable JAR containing all classes and dependencies.
+/// Build a Spring Boot nested JAR (executable) containing loader classes at the root,
+/// application classes under BOOT-INF/classes/, and dependency JARs (STORED) under BOOT-INF/lib/.
 pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf], output_base: Option<&Path>, root_version: Option<&str>) -> Result<()> {
+    use std::io::{Read, Write};
+
+    let out = config::output_classes_dir(project);
+    let base = output_base.unwrap_or(project);
+    let release_dir = base.join("out").join("release");
+    std::fs::create_dir_all(&release_dir)?;
+
+    let effective_version = cfg.version.as_deref()
+        .or(root_version)
+        .unwrap_or("0.0.0");
+    let jar_name = format!("{}-{}.jar", cfg.name, effective_version);
+    let jar_path = release_dir.join(&jar_name);
+
+    let pack_start = Instant::now();
+
+    // ── Step 1: Find spring-boot-loader JAR ──────────────────────────────
+    let loader_jar: Option<PathBuf> = {
+        // First, look in the jars list
+        let from_jars = jars.iter().find(|j| {
+            let name = j.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            name.contains("spring-boot-loader") && !name.contains("spring-boot-loader-tools")
+        });
+        if let Some(found) = from_jars {
+            Some(found.clone())
+        } else {
+            // Detect spring-boot version from spring-boot-autoconfigure JAR
+            let version = jars.iter().find_map(|j| {
+                let name = j.file_name()?.to_string_lossy().to_string();
+                let prefix = "spring-boot-autoconfigure-";
+                if name.starts_with(prefix) && name.ends_with(".jar") {
+                    Some(name[prefix.len()..name.len() - 4].to_string())
+                } else {
+                    None
+                }
+            });
+            if let Some(ver) = version {
+                let cache_dir = dirs::home_dir()
+                    .expect("Cannot determine home directory")
+                    .join(".ym")
+                    .join("caches")
+                    .join("org.springframework.boot")
+                    .join("spring-boot-loader");
+                // Try to find the loader JAR in the cache
+                let candidate = cache_dir.join(&ver).join(format!("spring-boot-loader-{}.jar", ver));
+                if candidate.exists() {
+                    Some(candidate)
+                } else {
+                    // Walk the cache directory looking for any version
+                    let mut found = None;
+                    if cache_dir.exists() {
+                        if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+                            for entry in entries.flatten() {
+                                let p = entry.path();
+                                if p.is_dir() {
+                                    for child in std::fs::read_dir(&p).into_iter().flatten().flatten() {
+                                        let cp = child.path();
+                                        let cn = cp.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                        if cn.starts_with("spring-boot-loader-") && cn.ends_with(".jar") && !cn.contains("tools") {
+                                            found = Some(cp);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if found.is_some() { break; }
+                            }
+                        }
+                    }
+                    found
+                }
+            } else {
+                None
+            }
+        }
+    };
+
+    // Detect Spring Boot version for MANIFEST.MF
+    let spring_boot_version: String = jars.iter().find_map(|j| {
+        let name = j.file_name()?.to_string_lossy().to_string();
+        let prefix = "spring-boot-autoconfigure-";
+        if name.starts_with(prefix) && name.ends_with(".jar") {
+            Some(name[prefix.len()..name.len() - 4].to_string())
+        } else {
+            None
+        }
+    }).unwrap_or_else(|| "unknown".to_string());
+
+    // If no loader JAR found, fall back to old flat JAR behavior with warning
+    if loader_jar.is_none() {
+        println!(
+            "{} spring-boot-loader JAR not found, falling back to flat JAR packaging",
+            style(format!("{:>12}", "warning")).yellow().bold(),
+        );
+        return build_release_jar_flat(project, cfg, jars, output_base, root_version);
+    }
+    let loader_jar = loader_jar.unwrap();
+
+    // Determine loader JAR filename so we can exclude it from BOOT-INF/lib/
+    let loader_jar_filename = loader_jar.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // ── Step 2: Create the output JAR directly (no staging directory) ────
+    let jar_file = std::fs::File::create(&jar_path)?;
+    let mut zip_writer = zip::ZipWriter::new(std::io::BufWriter::new(jar_file));
+    let deflated_options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let stored_options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+
+    let total_deps = jars.len();
+
+    // ── Step 3: Write META-INF/MANIFEST.MF (must be first entry) ─────────
+    eprint!(
+        "\r{} {} [manifest] {:.1}s   ",
+        style(format!("{:>12}", "Packaging")).green().bold(),
+        jar_name,
+        pack_start.elapsed().as_secs_f64()
+    );
+
+    let main_class = cfg.main.as_deref().unwrap_or("com.example.Application");
+    let manifest = format!(
+        "Manifest-Version: 1.0\n\
+         Main-Class: org.springframework.boot.loader.launch.JarLauncher\n\
+         Start-Class: {}\n\
+         Spring-Boot-Version: {}\n\
+         Spring-Boot-Classes: BOOT-INF/classes/\n\
+         Spring-Boot-Lib: BOOT-INF/lib/\n\
+         Spring-Boot-Classpath-Index: BOOT-INF/classpath.idx\n\
+         Spring-Boot-Layers-Index: BOOT-INF/layers.idx\n\
+         Implementation-Title: {}\n\
+         Implementation-Version: {}\n\
+         Build-Jdk-Spec: 25\n\
+         Built-By: ym {}\n\n",
+        main_class, spring_boot_version, cfg.name, effective_version, env!("CARGO_PKG_VERSION")
+    );
+
+    zip_writer.add_directory("META-INF/", deflated_options)?;
+    zip_writer.start_file("META-INF/MANIFEST.MF", deflated_options)?;
+    zip_writer.write_all(manifest.as_bytes())?;
+
+    // ── Step 4: Write FileSystemProvider service file ─────────────────────
+    zip_writer.add_directory("META-INF/services/", deflated_options)?;
+    zip_writer.start_file("META-INF/services/java.nio.file.spi.FileSystemProvider", deflated_options)?;
+    zip_writer.write_all(b"org.springframework.boot.loader.nio.file.NestedFileSystemProvider\n")?;
+
+    // ── Step 5: Extract loader classes from spring-boot-loader JAR ───────
+    eprint!(
+        "\r{} {} [loader classes] {:.1}s   ",
+        style(format!("{:>12}", "Packaging")).green().bold(),
+        jar_name,
+        pack_start.elapsed().as_secs_f64()
+    );
+    {
+        let loader_file = std::fs::File::open(&loader_jar)
+            .with_context(|| format!("Failed to open spring-boot-loader JAR: {}", loader_jar.display()))?;
+        let mut loader_archive = zip::ZipArchive::new(std::io::BufReader::new(loader_file))?;
+
+        // Collect directory entries to add them first
+        let mut loader_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for i in 0..loader_archive.len() {
+            let entry = match loader_archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let name = entry.name().to_string();
+            if name.starts_with("org/springframework/boot/loader/") {
+                // Collect parent directories
+                let mut parts: Vec<&str> = name.split('/').collect();
+                if !entry.is_dir() {
+                    parts.pop(); // remove filename
+                }
+                let mut dir = String::new();
+                for part in parts {
+                    if part.is_empty() { continue; }
+                    dir.push_str(part);
+                    dir.push('/');
+                    loader_dirs.insert(dir.clone());
+                }
+            }
+        }
+        // Also add "org/" and "org/springframework/" etc.
+        loader_dirs.insert("org/".to_string());
+        loader_dirs.insert("org/springframework/".to_string());
+        loader_dirs.insert("org/springframework/boot/".to_string());
+        loader_dirs.insert("org/springframework/boot/loader/".to_string());
+
+        for dir in &loader_dirs {
+            let _ = zip_writer.add_directory(dir, deflated_options);
+        }
+
+        for i in 0..loader_archive.len() {
+            let mut entry = match loader_archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let name = entry.name().to_string();
+            // Only extract org/springframework/boot/loader/** class files
+            if !name.starts_with("org/springframework/boot/loader/") || entry.is_dir() {
+                continue;
+            }
+            zip_writer.start_file(&name, deflated_options)?;
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            zip_writer.write_all(&buf)?;
+        }
+    }
+
+    // ── Step 6: Write BOOT-INF/classes/ (application classes + resources) ─
+    eprint!(
+        "\r{} {} [app classes] {:.1}s   ",
+        style(format!("{:>12}", "Packaging")).green().bold(),
+        jar_name,
+        pack_start.elapsed().as_secs_f64()
+    );
+
+    zip_writer.add_directory("BOOT-INF/", deflated_options)?;
+    zip_writer.add_directory("BOOT-INF/classes/", deflated_options)?;
+
+    if out.exists() {
+        for walk_entry in walkdir::WalkDir::new(&out).sort_by_file_name() {
+            let walk_entry = walk_entry?;
+            let path = walk_entry.path();
+            let relative = path.strip_prefix(&out)?;
+            let name = relative.to_string_lossy().replace('\\', "/");
+            if name.is_empty() {
+                continue;
+            }
+
+            let boot_name = format!("BOOT-INF/classes/{}", name);
+            if walk_entry.file_type().is_dir() {
+                let dir_name = if boot_name.ends_with('/') { boot_name } else { format!("{}/", boot_name) };
+                zip_writer.add_directory(dir_name, deflated_options)?;
+            } else {
+                zip_writer.start_file(&boot_name, deflated_options)?;
+                let mut f = std::fs::File::open(path)?;
+                std::io::copy(&mut f, &mut zip_writer)?;
+            }
+        }
+    }
+
+    // ── Step 7: Write BOOT-INF/lib/ (dependency JARs as STORED entries) ──
+    zip_writer.add_directory("BOOT-INF/lib/", stored_options)?;
+
+    let mut classpath_entries: Vec<String> = Vec::new();
+    let mut dep_jar_filenames: Vec<String> = Vec::new();
+
+    for (idx, dep) in jars.iter().enumerate() {
+        if !dep.exists() || dep.is_dir() {
+            continue;
+        }
+
+        let dep_filename = dep.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dep.display().to_string());
+
+        // Skip the loader JAR itself — its classes are already at the root
+        if dep_filename == loader_jar_filename {
+            continue;
+        }
+
+        // Skip non-JAR files
+        if !dep_filename.ends_with(".jar") {
+            continue;
+        }
+
+        eprint!(
+            "\r{} {} [{}/{}] {:.1}s   ",
+            style(format!("{:>12}", "Packaging")).green().bold(),
+            jar_name,
+            idx + 1,
+            total_deps,
+            pack_start.elapsed().as_secs_f64()
+        );
+
+        let lib_entry_name = format!("BOOT-INF/lib/{}", dep_filename);
+
+        // Read the entire JAR file and write as STORED entry
+        let mut jar_bytes = Vec::new();
+        let mut f = std::fs::File::open(dep)?;
+        f.read_to_end(&mut jar_bytes)?;
+
+        zip_writer.start_file(&lib_entry_name, stored_options)?;
+        zip_writer.write_all(&jar_bytes)?;
+
+        classpath_entries.push(format!("- \"BOOT-INF/lib/{}\"", dep_filename));
+        dep_jar_filenames.push(dep_filename);
+    }
+
+    // Clear progress line
+    eprint!("\r{}\r", " ".repeat(80));
+
+    // ── Step 8: Write BOOT-INF/classpath.idx ─────────────────────────────
+    eprint!(
+        "\r{} {} [classpath.idx] {:.1}s   ",
+        style(format!("{:>12}", "Packaging")).green().bold(),
+        jar_name,
+        pack_start.elapsed().as_secs_f64()
+    );
+
+    let classpath_idx = classpath_entries.join("\n") + "\n";
+    zip_writer.start_file("BOOT-INF/classpath.idx", deflated_options)?;
+    zip_writer.write_all(classpath_idx.as_bytes())?;
+
+    // ── Step 9: Write BOOT-INF/layers.idx ────────────────────────────────
+    let mut layers_idx = String::new();
+    layers_idx.push_str("- \"dependencies\":\n");
+    for dep_name in &dep_jar_filenames {
+        layers_idx.push_str(&format!("  - \"BOOT-INF/lib/{}\"\n", dep_name));
+    }
+    layers_idx.push_str("- \"spring-boot-loader\":\n");
+    layers_idx.push_str("  - \"org/\"\n");
+    layers_idx.push_str("- \"snapshot-dependencies\":\n");
+    layers_idx.push_str("- \"application\":\n");
+    layers_idx.push_str("  - \"BOOT-INF/classes/\"\n");
+    layers_idx.push_str("  - \"BOOT-INF/classpath.idx\"\n");
+    layers_idx.push_str("  - \"BOOT-INF/layers.idx\"\n");
+    layers_idx.push_str("  - \"META-INF/\"\n");
+
+    zip_writer.start_file("BOOT-INF/layers.idx", deflated_options)?;
+    zip_writer.write_all(layers_idx.as_bytes())?;
+
+    // ── Step 10: Finalize ────────────────────────────────────────────────
+    zip_writer.finish()?;
+
+    let pack_elapsed = pack_start.elapsed();
+    let jar_size = std::fs::metadata(&jar_path).map(|m| m.len()).unwrap_or(0);
+    let size_str = if jar_size >= 1024 * 1024 {
+        format!("{:.1} MB", jar_size as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.0} KB", jar_size as f64 / 1024.0)
+    };
+    eprint!("\r{}\r", " ".repeat(80));
+    println!(
+        "{} {} ({}) {:>22}ms",
+        style(format!("{:>12}", "Packaging")).green().bold(),
+        jar_name,
+        size_str,
+        pack_elapsed.as_millis()
+    );
+
+    Ok(())
+}
+
+/// Fallback: build a flat/uber JAR (used when spring-boot-loader is not found).
+fn build_release_jar_flat(project: &Path, cfg: &YmConfig, jars: &[PathBuf], output_base: Option<&Path>, root_version: Option<&str>) -> Result<()> {
+    use std::io::Read;
+
     let out = config::output_classes_dir(project);
     let base = output_base.unwrap_or(project);
     let release_dir = base.join("out").join("release");
@@ -872,9 +1220,7 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
 
     copy_dir_recursive(&out, &staging)?;
 
-    // Single-pass: extract deps + collect mergeable META-INF + detect class conflicts
     let mut mergeable: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let mut class_sources: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
     let total_deps = jars.len();
     let pack_start = Instant::now();
@@ -883,7 +1229,6 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
             continue;
         }
 
-        // Progress: show count and elapsed time during dependency extraction
         eprint!(
             "\r{} {} [{}/{}] {:.1}s   ",
             style(format!("{:>12}", "Packaging")).green().bold(),
@@ -896,10 +1241,6 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
         if dep.is_dir() {
             copy_dir_recursive(dep, &staging)?;
         } else {
-            let jar_file_name = dep.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| dep.display().to_string());
-
             let file = match std::fs::File::open(dep) {
                 Ok(f) => f,
                 Err(_) => continue,
@@ -916,8 +1257,6 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
                 };
                 let name = entry.name().to_string();
 
-                // Skip META-INF/MANIFEST.MF (we write our own), signature files
-                // (cause SecurityException in fat JARs), and unsafe paths
                 if name == "META-INF/MANIFEST.MF"
                     || name.starts_with('/')
                     || name.contains("..")
@@ -931,29 +1270,18 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
                     continue;
                 }
 
-                // Track class conflicts
-                if name.ends_with(".class")
-                    && !name.starts_with("META-INF/")
-                    && name != "module-info.class"
-                {
-                    class_sources.entry(name.clone()).or_default().push(jar_file_name.clone());
-                }
-
-                // Collect mergeable META-INF entries (don't extract, will merge later)
                 let is_mergeable = !entry.is_dir() && (
                     name.starts_with("META-INF/services/") ||
                     name == "META-INF/spring.factories" ||
                     (name.starts_with("META-INF/spring/") && name.ends_with(".imports"))
                 );
                 if is_mergeable {
-                    use std::io::Read;
                     let mut content = String::new();
                     let _ = entry.read_to_string(&mut content);
                     mergeable.entry(name).or_default().push(content);
                     continue;
                 }
 
-                // Extract entry to staging
                 if entry.is_dir() {
                     let _ = std::fs::create_dir_all(staging.join(&name));
                 } else {
@@ -968,37 +1296,8 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
             }
         }
     }
-    // Clear progress line
     eprint!("\r{}\r", " ".repeat(60));
 
-    // Report class conflicts across dependency JARs
-    {
-        let mut conflicts: Vec<(String, Vec<String>)> = class_sources
-            .into_iter()
-            .filter(|(_, sources)| sources.len() > 1)
-            .collect();
-        if !conflicts.is_empty() {
-            conflicts.sort_by(|a, b| a.0.cmp(&b.0));
-            let total = conflicts.len();
-            println!(
-                "{} fat JAR: {} duplicate class(es) detected across dependency JARs",
-                style(format!("{:>12}", "warning")).yellow().bold(),
-                total
-            );
-            for (class_path, sources) in conflicts.iter().take(10) {
-                let class_name = class_path
-                    .strip_suffix(".class")
-                    .unwrap_or(class_path)
-                    .replace('/', ".");
-                println!("    {} → {}", class_name, sources.join(", "));
-            }
-            if total > 10 {
-                println!("    ... and {} more", total - 10);
-            }
-        }
-    }
-
-    // Write merged META-INF files (combine entries from all JARs, deduplicate lines)
     for (meta_file, contents) in &mergeable {
         let merged_path = staging.join(meta_file);
         if let Some(parent) = merged_path.parent() {
@@ -1036,25 +1335,13 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
     }
     manifest.push_str(&format!("Implementation-Vendor: {}\n", cfg.group_id));
     manifest.push_str(&format!("Built-By: ym {}\n", env!("CARGO_PKG_VERSION")));
-    if staging.join("META-INF").join("versions").is_dir() {
-        manifest.push_str("Multi-Release: true\n");
-    }
     manifest.push('\n');
     std::fs::write(manifest_dir.join("MANIFEST.MF"), &manifest)?;
 
-    // Create JAR using zip crate (no JVM subprocess needed)
     let jar_file = std::fs::File::create(&jar_path)?;
     let mut zip_writer = zip::ZipWriter::new(std::io::BufWriter::new(jar_file));
     let zip_options = zip::write::SimpleFileOptions::default();
 
-    eprint!(
-        "\r{} {} [creating jar] {:.1}s   ",
-        style(format!("{:>12}", "Packaging")).green().bold(),
-        jar_name,
-        pack_start.elapsed().as_secs_f64()
-    );
-
-    // JAR spec: META-INF/MANIFEST.MF must be the first entry
     zip_writer.add_directory("META-INF/", zip_options)?;
     zip_writer.start_file("META-INF/MANIFEST.MF", zip_options)?;
     std::io::copy(
@@ -1099,13 +1386,7 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
         pack_elapsed.as_millis()
     );
 
-    // Clean up staging directory (can be slow for large projects with many files)
-    eprint!(
-        "\r{} cleaning up staging...   ",
-        style(format!("{:>12}", "Packaging")).green().bold(),
-    );
     let _ = std::fs::remove_dir_all(&staging);
-    eprint!("\r{}\r", " ".repeat(60));
 
     Ok(())
 }
