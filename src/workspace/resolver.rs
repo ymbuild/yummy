@@ -779,7 +779,10 @@ fn resolve_inner(
         if !crate::SPINNER_ACTIVE.load(Ordering::Relaxed) {
             for (key, result) in &download_results {
                 if let Err(e) = result {
-                    eprintln!("{} {} — {}", style(format!("{:>12}", "error")).red().bold(), key, e);
+                    let msg = e.to_string();
+                    if !msg.contains("HTTP 404") {
+                        eprintln!("{} {} — {}", style(format!("{:>12}", "error")).red().bold(), key, e);
+                    }
                 }
             }
             print_gpg_summary();
@@ -794,7 +797,16 @@ fn resolve_inner(
                         entry.sha256 = Some(hash);
                     }
                 }
-                Err(e) => failures.push(format!("{}: {}", key, e)),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("HTTP 404") {
+                        // POM-only artifact (e.g. kotlin-stdlib-common merged into kotlin-stdlib in Kotlin 2.x).
+                        // POM exists but JAR doesn't — skip gracefully.
+                        eprintln!("{} {} (pom-only, no JAR — skipped)", style(format!("{:>12}", "Skipping")).yellow().bold(), key);
+                    } else {
+                        failures.push(format!("{}: {}", key, e));
+                    }
+                }
             }
         }
         if !failures.is_empty() {
