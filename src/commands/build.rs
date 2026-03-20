@@ -1036,6 +1036,9 @@ pub(crate) fn build_release_jar(project: &Path, cfg: &YmConfig, jars: &[PathBuf]
     }
     manifest.push_str(&format!("Implementation-Vendor: {}\n", cfg.group_id));
     manifest.push_str(&format!("Built-By: ym {}\n", env!("CARGO_PKG_VERSION")));
+    if staging.join("META-INF").join("versions").is_dir() {
+        manifest.push_str("Multi-Release: true\n");
+    }
     manifest.push('\n');
     std::fs::write(manifest_dir.join("MANIFEST.MF"), &manifest)?;
 
