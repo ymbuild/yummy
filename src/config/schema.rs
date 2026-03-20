@@ -806,6 +806,12 @@ impl YmConfig {
                 entries.push(crate::workspace::resolver::RegistryEntry {
                     url: resolved_url,
                     scope: value.scope().map(|s| s.to_string()),
+                    username: value.username().map(|u| {
+                        if u.contains("${") { Self::resolve_env_vars(u) } else { u.to_string() }
+                    }),
+                    password: value.password().map(|p| {
+                        if p.contains("${") { Self::resolve_env_vars(p) } else { p.to_string() }
+                    }),
                 });
             }
         }

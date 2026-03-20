@@ -82,6 +82,8 @@ fn append_native_jars(jars: &mut Vec<PathBuf>) {
 pub struct RegistryEntry {
     pub url: String,
     pub scope: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 /// A parsed Maven coordinate
@@ -849,10 +851,12 @@ fn resolve_snapshot_version(
 ) -> Option<(String, String)> {
     let repos = repos_for_group_id(registries, &coord.group_id);
     for repo in &repos {
-        let url = coord.metadata_url(repo);
+        let url = coord.metadata_url(&repo.url);
 
         let mut request = client.get(&url);
-        if let Some((username, password)) = load_credentials_for_url(&url) {
+        if let (Some(u), Some(p)) = (&repo.username, &repo.password) {
+            request = request.basic_auth(u, Some(p));
+        } else if let Some((username, password)) = load_credentials_for_url(&url) {
             request = request.basic_auth(username, Some(password));
         }
 
@@ -1492,25 +1496,40 @@ fn resolve_properties(value: &str, properties: &HashMap<String, String>) -> Stri
 /// 1. If groupId matches a registry's `scope` → only that registry (no fallback)
 /// 2. No scope match → try registries without scope in order, then Maven Central
 /// 3. Maven Central is always fallback unless dependency was scope-routed
-fn repos_for_group_id(registries: &[RegistryEntry], group_id: &str) -> Vec<String> {
+fn repos_for_group_id(registries: &[RegistryEntry], group_id: &str) -> Vec<RegistryEntry> {
     // Step 1: Check for scope-matched registries
     for entry in registries {
         if let Some(ref scope_pattern) = entry.scope {
             if matches_scope(group_id, scope_pattern) {
-                return vec![entry.url.trim_end_matches('/').to_string()];
+                return vec![RegistryEntry {
+                    url: entry.url.trim_end_matches('/').to_string(),
+                    scope: entry.scope.clone(),
+                    username: entry.username.clone(),
+                    password: entry.password.clone(),
+                }];
             }
         }
     }
 
     // Step 2: No scope match — collect unscoped registries + Maven Central
-    let mut repos: Vec<String> = registries
+    let mut repos: Vec<RegistryEntry> = registries
         .iter()
         .filter(|e| e.scope.is_none())
-        .map(|e| e.url.trim_end_matches('/').to_string())
+        .map(|e| RegistryEntry {
+            url: e.url.trim_end_matches('/').to_string(),
+            scope: None,
+            username: e.username.clone(),
+            password: e.password.clone(),
+        })
         .collect();
     let central = DEFAULT_REPO.to_string();
-    if !repos.contains(&central) {
-        repos.push(central);
+    if !repos.iter().any(|r| r.url == central) {
+        repos.push(RegistryEntry {
+            url: central,
+            scope: None,
+            username: None,
+            password: None,
+        });
     }
     repos
 }
@@ -1543,8 +1562,12 @@ fn download_from_repos(
     let repos = repos_for_group_id(registries, &coord.group_id);
     let mut last_err = None;
     for repo in &repos {
-        let url = url_fn(coord, repo);
-        match download_file(client, &url, path, progress) {
+        let url = url_fn(coord, &repo.url);
+        let creds = match (&repo.username, &repo.password) {
+            (Some(u), Some(p)) => Some((u.as_str(), p.as_str())),
+            _ => None,
+        };
+        match download_file(client, &url, path, progress, creds) {
             Ok(hash) => return Ok(hash),
             Err(e) => last_err = Some(e),
         }
@@ -1561,6 +1584,7 @@ fn download_file(
     url: &str,
     path: &Path,
     progress: Option<&(dyn Fn(u64, u64) + Send + Sync)>,
+    inline_creds: Option<(&str, &str)>,
 ) -> Result<String> {
     let max_retries = 3;
     let mut last_err = None;
@@ -1573,8 +1597,10 @@ fn download_file(
 
         let mut request = client.get(url);
 
-        // Apply credentials if available for this URL
-        if let Some((username, password)) = load_credentials_for_url(url) {
+        // Apply credentials: prefer inline (from registry config), fallback to credentials.json
+        if let Some((username, password)) = inline_creds {
+            request = request.basic_auth(username, Some(password));
+        } else if let Some((username, password)) = load_credentials_for_url(url) {
             request = request.basic_auth(username, Some(password));
         }
 
@@ -2387,41 +2413,41 @@ mod tests {
     fn test_repos_for_group_id_no_registries() {
         let repos = repos_for_group_id(&[], "com.example");
         assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0], DEFAULT_REPO);
+        assert_eq!(repos[0].url, DEFAULT_REPO);
     }
 
     #[test]
     fn test_repos_for_group_id_unscoped_registry() {
         let entries = vec![
-            RegistryEntry { url: "https://custom.repo/maven".into(), scope: None },
+            RegistryEntry { url: "https://custom.repo/maven".into(), scope: None, username: None, password: None },
         ];
         let repos = repos_for_group_id(&entries, "com.example");
         assert_eq!(repos.len(), 2);
-        assert_eq!(repos[0], "https://custom.repo/maven");
-        assert_eq!(repos[1], DEFAULT_REPO);
+        assert_eq!(repos[0].url, "https://custom.repo/maven");
+        assert_eq!(repos[1].url, DEFAULT_REPO);
     }
 
     #[test]
     fn test_repos_for_group_id_scope_match() {
         let entries = vec![
-            RegistryEntry { url: "https://private.repo/maven".into(), scope: Some("com.mycompany.*".into()) },
-            RegistryEntry { url: "https://other.repo/maven".into(), scope: None },
+            RegistryEntry { url: "https://private.repo/maven".into(), scope: Some("com.mycompany.*".into()), username: None, password: None },
+            RegistryEntry { url: "https://other.repo/maven".into(), scope: None, username: None, password: None },
         ];
         // Matching groupId → only scoped repo, no fallback
         let repos = repos_for_group_id(&entries, "com.mycompany.core");
         assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0], "https://private.repo/maven");
+        assert_eq!(repos[0].url, "https://private.repo/maven");
         // Non-matching groupId → unscoped repos + Central
         let repos = repos_for_group_id(&entries, "org.apache.commons");
         assert_eq!(repos.len(), 2);
-        assert_eq!(repos[0], "https://other.repo/maven");
-        assert_eq!(repos[1], DEFAULT_REPO);
+        assert_eq!(repos[0].url, "https://other.repo/maven");
+        assert_eq!(repos[1].url, DEFAULT_REPO);
     }
 
     #[test]
     fn test_repos_for_group_id_no_duplicate_central() {
         let entries = vec![
-            RegistryEntry { url: DEFAULT_REPO.into(), scope: None },
+            RegistryEntry { url: DEFAULT_REPO.into(), scope: None, username: None, password: None },
         ];
         let repos = repos_for_group_id(&entries, "com.example");
         assert_eq!(repos.len(), 1);
@@ -2430,10 +2456,10 @@ mod tests {
     #[test]
     fn test_repos_for_group_id_trims_trailing_slash() {
         let entries = vec![
-            RegistryEntry { url: "https://custom.repo/maven/".into(), scope: None },
+            RegistryEntry { url: "https://custom.repo/maven/".into(), scope: None, username: None, password: None },
         ];
         let repos = repos_for_group_id(&entries, "com.example");
-        assert_eq!(repos[0], "https://custom.repo/maven");
+        assert_eq!(repos[0].url, "https://custom.repo/maven");
     }
 
     #[test]
