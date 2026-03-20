@@ -281,6 +281,76 @@ fn build_impl(targets: Vec<String>, package: bool, keep_going: bool) -> Result<(
     Ok(())
 }
 
+/// Deduplicate JAR paths by Maven artifact ID (groupId:artifactId), keeping the highest version.
+/// Parses filename pattern: `artifactId-version.jar` where version starts at the first `-digit`.
+fn dedup_jars_by_artifact(jars: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut ga_map: std::collections::HashMap<String, (PathBuf, String)> = std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut non_jar: Vec<PathBuf> = Vec::new();
+
+    for jar in jars {
+        let filename = jar.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !filename.ends_with(".jar") || jar.is_dir() {
+            non_jar.push(jar);
+            continue;
+        }
+        let stem = filename.strip_suffix(".jar").unwrap_or(&filename);
+        // Find artifact ID: everything before the first "-digit" sequence
+        let artifact_id = {
+            let bytes = stem.as_bytes();
+            let mut split = stem.len();
+            for i in 0..bytes.len().saturating_sub(1) {
+                if bytes[i] == b'-' && bytes[i + 1].is_ascii_digit() {
+                    split = i;
+                    break;
+                }
+            }
+            &stem[..split]
+        };
+        let version = if artifact_id.len() < stem.len() {
+            &stem[artifact_id.len() + 1..]
+        } else {
+            ""
+        };
+        let key = artifact_id.to_string();
+
+        if let Some((_, existing_ver)) = ga_map.get(&key) {
+            // Compare versions segment by segment
+            let parse_ver = |s: &str| -> Vec<i64> {
+                s.split(|c: char| c == '.' || c == '-')
+                    .map(|seg| seg.parse::<i64>().unwrap_or(0))
+                    .collect()
+            };
+            let va = parse_ver(version);
+            let vb = parse_ver(existing_ver);
+            let len = va.len().max(vb.len());
+            let mut higher = false;
+            for i in 0..len {
+                let a = va.get(i).copied().unwrap_or(0);
+                let b = vb.get(i).copied().unwrap_or(0);
+                if a > b { higher = true; break; }
+                if a < b { break; }
+            }
+            if higher {
+                ga_map.insert(key, (jar, version.to_string()));
+            }
+        } else {
+            order.push(key.clone());
+            ga_map.insert(key, (jar, version.to_string()));
+        }
+    }
+
+    let mut result = non_jar;
+    for key in &order {
+        if let Some((path, _)) = ga_map.get(key) {
+            result.push(path.clone());
+        }
+    }
+    result
+}
+
 fn print_total_time(start: Instant) {
     let elapsed = start.elapsed();
     let time = if elapsed.as_millis() > 1000 {
@@ -731,9 +801,10 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
             crate::RESOLVER_QUIET.store(false, std::sync::atomic::Ordering::Relaxed);
             all_deps.extend(runtime_jars);
 
-            // Deduplicate and remove published JARs that duplicate workspace modules
+            // Deduplicate: by path first, then by groupId:artifactId (keep highest version)
             all_deps.sort();
             all_deps.dedup();
+            all_deps = dedup_jars_by_artifact(all_deps);
             all_deps.retain(|path| {
                 if path.is_dir() { return true; }
                 let file_name = path.file_name()
