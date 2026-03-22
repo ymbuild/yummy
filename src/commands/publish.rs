@@ -224,7 +224,7 @@ fn publish_all_workspace_modules(
 
     let elapsed = publish_start.elapsed();
     let elapsed_str = if elapsed.as_secs() >= 60 {
-        format!("{:.1}m", elapsed.as_secs_f64() / 60.0)
+        format!("{:.1} minutes", elapsed.as_secs_f64() / 60.0)
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
     };
