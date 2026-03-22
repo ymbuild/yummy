@@ -135,13 +135,16 @@ pub fn execute(target: Option<String>, registry: Option<&str>, dry_run: bool) ->
     Ok(())
 }
 
-/// Publish all non-private workspace modules.
+/// Publish all non-private workspace modules (parallel artifact generation + upload).
 fn publish_all_workspace_modules(
     config_path: &Path,
     workspace_root: &Path,
     registry: Option<&str>,
     dry_run: bool,
 ) -> Result<()> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     let ws = crate::workspace::graph::WorkspaceGraph::build(workspace_root)?;
 
     // Build all modules first
@@ -149,51 +152,84 @@ fn publish_all_workspace_modules(
 
     let root_cfg = config::load_config(config_path)?;
     let reg = resolve_registry(&root_cfg, registry)?;
-    let registry_url = &reg.url;
+    let registry_url = reg.url.clone();
     let creds_path = credentials_path();
-    let creds = load_credentials_for_registry(&creds_path, registry_url, reg.inline_creds)?;
+    let creds = load_credentials_for_registry(&creds_path, &registry_url, reg.inline_creds)?;
 
-    let mut published = 0;
+    // Collect publishable modules
+    let mut modules: Vec<_> = Vec::new();
     let mut skipped = 0;
-
     for pkg_name in &ws.all_packages() {
         let pkg = ws.get_package(pkg_name).unwrap();
-        let module_cfg = &pkg.config;
-        if module_cfg.private.unwrap_or(false) {
+        if pkg.config.private.unwrap_or(false) {
             skipped += 1;
             continue;
         }
-
-        let version = module_cfg.version.as_deref()
+        let version = pkg.config.version.as_deref()
             .or(root_cfg.version.as_deref())
-            .unwrap_or("0.0.0");
-        let module_path = &pkg.path;
-
-        // Generate POM
-        let pom_path = module_path.join("out").join("pom.xml");
-        generate_pom(module_path, module_cfg, &pom_path, Some(version))?;
-
-        // Find/create thin JAR
-        let jar_path = find_output_jar(module_path, module_cfg, Some(version))?;
-        let sources_jar = generate_sources_jar(module_path, module_cfg, Some(version))?;
-        let javadoc_jar = generate_javadoc_jar(module_path, module_cfg, Some(version))?;
-
-        if dry_run {
-            println!("  {} would publish {}@{}", style("·").dim(), style(&module_cfg.name).bold(), version);
-        } else {
-            upload_artifact(&jar_path, &pom_path, &sources_jar, javadoc_jar.as_deref(), module_cfg, registry_url, &creds, Some(version))?;
-            println!("  {} Published {}@{}", style("✓").green(), style(&module_cfg.name).bold(), version);
-        }
-        published += 1;
+            .unwrap_or("0.0.0")
+            .to_string();
+        modules.push((pkg.path.clone(), pkg.config.clone(), version));
     }
+
+    let total = modules.len();
+    if dry_run {
+        for (_, cfg, ver) in &modules {
+            println!("  {} would publish {}@{}", style("·").dim(), style(&cfg.name).bold(), ver);
+        }
+        println!("\n  {} {} modules would be published, {} skipped (private)", style("✓").green(), total, skipped);
+        return Ok(());
+    }
+
+    println!(
+        "  {} publishing {} modules to {}",
+        style("➜").green(),
+        total,
+        style(&registry_url).dim()
+    );
+
+    // Parallel: generate artifacts + upload (8 threads)
+    let published = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+
+    let results: Vec<_> = modules.par_iter().map(|(module_path, module_cfg, version)| {
+        let result = (|| -> Result<()> {
+            let pom_path = module_path.join("out").join("pom.xml");
+            generate_pom(module_path, module_cfg, &pom_path, Some(version))?;
+            let jar_path = find_output_jar(module_path, module_cfg, Some(version))?;
+            let sources_jar = generate_sources_jar(module_path, module_cfg, Some(version))?;
+            let javadoc_jar = generate_javadoc_jar(module_path, module_cfg, Some(version))?;
+            upload_artifact(&jar_path, &pom_path, &sources_jar, javadoc_jar.as_deref(), module_cfg, &registry_url, &creds, Some(version.as_str()))?;
+            Ok(())
+        })();
+        match &result {
+            Ok(()) => {
+                let n = published.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("\r  {} Published [{}/{}] {}", style("✓").green(), n, total, &module_cfg.name);
+            }
+            Err(e) => {
+                failed.fetch_add(1, Ordering::Relaxed);
+                eprintln!("\r  {} Failed {} : {}", style("✗").red(), &module_cfg.name, e);
+            }
+        }
+        (module_cfg.name.clone(), result)
+    }).collect();
+
+    let pub_count = published.load(Ordering::Relaxed);
+    let fail_count = failed.load(Ordering::Relaxed);
 
     println!();
     println!(
-        "  {} {} modules published, {} skipped (private)",
+        "  {} {} published, {} failed, {} skipped (private)",
         style("✓").green(),
-        published,
+        pub_count,
+        fail_count,
         skipped
     );
+
+    if fail_count > 0 {
+        bail!("{} module(s) failed to publish", fail_count);
+    }
 
     Ok(())
 }
