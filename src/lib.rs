@@ -75,6 +75,14 @@ pub fn is_json_quiet() -> bool {
 /// When true, resolver's internal eprint progress is suppressed.
 pub static RESOLVER_QUIET: AtomicBool = AtomicBool::new(false);
 
+/// When true, all progress spinners and animations are suppressed.
+/// Set by --quiet flag or auto-detected in CI environments (CI=true).
+pub static PROGRESS_QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn is_progress_quiet() -> bool {
+    PROGRESS_QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Global progress spinner active flag — when true, resolver skips raw eprint output.
 pub static SPINNER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -129,6 +137,10 @@ struct YmCli {
     /// Color output: auto, always, never
     #[arg(long, global = true, default_value = "auto")]
     color: ColorMode,
+
+    /// Suppress progress spinners and animations (useful for CI)
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
 
     #[command(subcommand)]
     command: YmCommands,
@@ -303,6 +315,10 @@ struct YmcCli {
     #[arg(long, global = true, default_value = "auto")]
     color: ColorMode,
 
+    /// Suppress progress spinners and animations (useful for CI)
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
+
     #[command(subcommand)]
     command: YmcCommands,
 }
@@ -471,9 +487,18 @@ fn run_result(result: Result<()>) {
 //  YM dispatch
 // ============================================================
 
+fn apply_quiet_mode(quiet: bool) {
+    let is_ci = std::env::var("CI").map(|v| v == "true").unwrap_or(false);
+    if quiet || is_ci {
+        PROGRESS_QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+        RESOLVER_QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn ym_main() -> Result<()> {
     let cli = YmCli::parse();
     apply_color_mode(&cli.color);
+    apply_quiet_mode(cli.quiet);
     match cli.command {
         YmCommands::Init { name, interactive, template, yes } => {
             commands::init::execute(name, interactive, template, yes)
@@ -698,6 +723,7 @@ fn print_version_banner(context: &str) {
 
 fn dispatch_ymc(cli: YmcCli) -> Result<()> {
     apply_color_mode(&cli.color);
+    apply_quiet_mode(cli.quiet);
 
     // Print version banner (skip for JSON output modes and Build command which uses cargo-style)
     let is_json = matches!(&cli.command, YmcCommands::Idea { json: true, .. });

@@ -23,6 +23,12 @@ struct SimpleSpinner {
 
 impl SimpleSpinner {
     fn new(msg: &str) -> Self {
+        if crate::is_progress_quiet() {
+            return Self {
+                running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                handle: None,
+            };
+        }
         crate::set_spinner_msg(msg);
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let r = running.clone();

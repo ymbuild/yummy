@@ -148,13 +148,18 @@ fn download_jdk(version: &str, _vendor: &str, jdk_dir: &Path) -> Result<PathBuf>
     }
 
     let total_size = response.content_length().unwrap_or(0);
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("  [{bar:40.cyan/dim}] {bytes}/{total_bytes} ({eta})")
-            .unwrap()
-            .progress_chars("=> "),
-    );
+    let pb = if crate::is_progress_quiet() {
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new(total_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("  [{bar:40.cyan/dim}] {bytes}/{total_bytes} ({eta})")
+                .unwrap()
+                .progress_chars("=> "),
+        );
+        pb
+    };
 
     let bytes = response.bytes()?;
     pb.finish_and_clear();

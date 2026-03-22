@@ -438,7 +438,9 @@ fn download_with_progress(url: &str, dest: &Path) -> Result<()> {
     }
 
     let total = response.content_length().unwrap_or(0);
-    let pb = if total > 0 {
+    let pb = if crate::is_progress_quiet() {
+        ProgressBar::hidden()
+    } else if total > 0 {
         let pb = ProgressBar::new(total);
         pb.set_style(
             ProgressStyle::default_bar()
