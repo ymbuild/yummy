@@ -458,8 +458,10 @@ fn generate_sources_jar(project: &Path, cfg: &config::schema::YmConfig, version_
     }
 
     println!(
-        "  {} Generated sources JAR",
-        style("✓").green()
+        "  {} Generated sources JAR for {}@{}",
+        style("✓").green(),
+        cfg.name,
+        version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0")
     );
 
     Ok(jar_path)
@@ -530,8 +532,10 @@ fn generate_javadoc_jar(project: &Path, cfg: &config::schema::YmConfig, version_
         Ok(s) if s.success() => {}
         _ => {
             println!(
-                "  {} Javadoc generation failed (non-fatal), skipping javadoc JAR",
-                style("!").yellow()
+                "  {} Javadoc generation failed for {}@{} (non-fatal), skipping",
+                style("!").yellow(),
+                cfg.name,
+                version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0")
             );
             return Ok(None);
         }
@@ -554,13 +558,16 @@ fn generate_javadoc_jar(project: &Path, cfg: &config::schema::YmConfig, version_
 
     if !status.success() {
         println!(
-            "  {} Failed to create javadoc JAR (non-fatal)",
-            style("!").yellow()
+            "  {} Failed to create javadoc JAR for {}@{} (non-fatal)",
+            style("!").yellow(),
+            cfg.name,
+            version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0")
         );
         return Ok(None);
     }
 
-    println!("  {} Generated javadoc JAR", style("✓").green());
+    println!("  {} Generated javadoc JAR for {}@{}", style("✓").green(),
+        cfg.name, version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0"));
     Ok(Some(jar_path))
 }
 
