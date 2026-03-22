@@ -346,9 +346,16 @@ fn generate_pom(
     output: &Path,
     version_override: Option<&str>,
 ) -> Result<()> {
-    // Load workspace graph if we're in a workspace (for module dep mapping)
-    let ws = config::find_workspace_root(project)
+    // Load workspace root config for version resolution
+    let ws_root = config::find_workspace_root(project);
+    let root_cfg = ws_root.as_ref()
+        .and_then(|root| config::load_config(&root.join(config::CONFIG_FILE)).ok());
+    let ws = ws_root
         .and_then(|root| crate::workspace::graph::WorkspaceGraph::build(&root).ok());
+    let root_version = root_cfg.as_ref()
+        .and_then(|r| r.version.as_deref())
+        .or(version_override)
+        .unwrap_or("0.0.0");
 
     // Build dependency XML, respecting scopes (skip test scope per spec)
     let mut dep_xml = String::new();
@@ -358,7 +365,6 @@ fn generate_pom(
             if !crate::config::schema::is_maven_dep(coord) && value.is_workspace() {
                 if let Some(ref ws) = ws {
                     if let Some(pkg) = ws.get_package(coord) {
-                        let mod_version = pkg.config.version.as_deref().unwrap_or("0.0.0");
                         dep_xml.push_str(&format!(
                             r#"    <dependency>
       <groupId>{}</groupId>
@@ -366,7 +372,7 @@ fn generate_pom(
       <version>{}</version>
     </dependency>
 "#,
-                            pkg.config.group_id, pkg.config.name, mod_version
+                            pkg.config.group_id, pkg.config.name, root_version
                         ));
                     }
                 }
@@ -376,9 +382,15 @@ fn generate_pom(
             if !crate::config::schema::is_maven_dep(coord) || value.is_workspace() {
                 continue;
             }
-            let version = match value.version() {
+            let raw_version = match value.version() {
                 Some(v) => v,
                 None => continue,
+            };
+            // Resolve ${project.version}, ${ext.*} and other variables
+            let version = if let Some(ref root) = root_cfg {
+                config::schema::YmConfig::resolve_var(raw_version, root)
+            } else {
+                raw_version.to_string()
             };
             let scope = value.scope();
             // Test-scoped deps are NOT written to POM (per spec)

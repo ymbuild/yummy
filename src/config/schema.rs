@@ -411,7 +411,7 @@ impl YmConfig {
     /// Built-in: `${project.version}`, `${project.groupId}`.
     /// Custom: `${key}` from `[ext]` section.
     /// `root` is the workspace root config (or self for root-level calls).
-    fn resolve_var(version: &str, root: &YmConfig) -> String {
+    pub fn resolve_var(version: &str, root: &YmConfig) -> String {
         if !version.contains("${") {
             return version.to_string();
         }
