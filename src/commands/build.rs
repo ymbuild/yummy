@@ -795,21 +795,38 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
     } // end of else block (workspace fingerprint skip)
 
     if package {
-        // Package fat JARs for modules with a `main` field
-        // - If target specified: only that module
-        // - If no target: all modules with a `main` field
+        // Package JARs for all modules:
+        // - Modules with `main`: fat JAR (Spring Boot executable)
+        // - Library modules (no `main`): thin JAR (own classes + resources only)
         let jar_targets: Vec<&str> = if !targets.is_empty() {
             targets.iter().map(|s| s.as_str()).collect()
         } else {
-            packages.iter()
-                .filter(|name| {
-                    ws.get_package(name)
-                        .map(|p| p.config.main.is_some())
-                        .unwrap_or(false)
-                })
-                .map(|s| s.as_str())
-                .collect()
+            packages.iter().map(|s| s.as_str()).collect()
         };
+
+        // Library modules: thin JAR
+        for pkg_name in &jar_targets {
+            let pkg = ws.get_package(pkg_name).unwrap();
+            if pkg.config.main.is_none() {
+                let effective_version = pkg.config.version.as_deref()
+                    .or(root_cfg.version.as_deref())
+                    .unwrap_or("0.0.0");
+                let jar_name = format!("{}-{}.jar", pkg.config.name, effective_version);
+                let output_jar = pkg.path.join("out").join("release").join(&jar_name);
+                let class_dir = config::output_classes_dir(&pkg.path);
+                let resource_dir = pkg.path.join("src").join("main").join("resources");
+                let fp = compute_packaging_fingerprint(&class_dir, &resource_dir, &[], &pkg.config)?;
+                if !should_skip_packaging(&pkg.path, &fp, &output_jar) {
+                    build_library_jar(&pkg.path, &pkg.config, root_cfg.version.as_deref())?;
+                    save_packaging_fingerprint(&pkg.path, &fp)?;
+                }
+            }
+        }
+
+        // App modules: fat JAR (filter to only main modules)
+        let jar_targets: Vec<&str> = jar_targets.into_iter()
+            .filter(|name| ws.get_package(name).map(|p| p.config.main.is_some()).unwrap_or(false))
+            .collect();
 
         for jar_target in &jar_targets {
             let pkg = ws.get_package(jar_target).unwrap();
