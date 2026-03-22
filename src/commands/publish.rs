@@ -197,13 +197,20 @@ fn publish_all_workspace_modules(
     let published = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
 
+    // Shared across all threads: HTTP client (connection pooling) + GPG check (once)
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("ym/", env!("CARGO_PKG_VERSION")))
+        .pool_max_idle_per_host(num_threads)
+        .build()?;
+    let gpg_available = check_gpg_available();
+
     let results: Vec<_> = pool.install(|| modules.par_iter().map(|(module_path, module_cfg, version)| {
         let result = (|| -> Result<()> {
             let pom_path = module_path.join("out").join("pom.xml");
             generate_pom(module_path, module_cfg, &pom_path, Some(version))?;
             let jar_path = find_output_jar(module_path, module_cfg, Some(version))?;
             let sources_jar = generate_sources_jar(module_path, module_cfg, Some(version))?;
-            upload_artifact(&jar_path, &pom_path, &sources_jar, None, module_cfg, &registry_url, &creds, Some(version.as_str()))?;
+            upload_artifact_with(&jar_path, &pom_path, &sources_jar, None, module_cfg, &registry_url, &creds, Some(version.as_str()), &client, gpg_available)?;
             Ok(())
         })();
         match &result {
@@ -436,34 +443,28 @@ fn generate_sources_jar(project: &Path, cfg: &config::schema::YmConfig, version_
         version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0")
     );
     let jar_path = project.join("out").join(&jar_name);
+    if let Some(parent) = jar_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
-    if !source_dir.exists() {
-        // No sources, create empty sources JAR
-        let status = std::process::Command::new("jar")
-            .arg("cf")
-            .arg(&jar_path)
-            .arg("-C")
-            .arg(project.join("out"))
-            .arg(".")
-            .status()?;
-        if !status.success() {
-            bail!("Failed to create sources JAR");
+    let file = std::fs::File::create(&jar_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    if source_dir.exists() {
+        for entry in walkdir::WalkDir::new(&source_dir).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() {
+                let rel = path.strip_prefix(&source_dir).unwrap_or(path);
+                zip.start_file(rel.to_string_lossy(), options)?;
+                let mut f = std::fs::File::open(path)?;
+                std::io::copy(&mut f, &mut zip)?;
+            }
         }
-        return Ok(jar_path);
     }
 
-    let status = std::process::Command::new("jar")
-        .arg("cf")
-        .arg(&jar_path)
-        .arg("-C")
-        .arg(&source_dir)
-        .arg(".")
-        .status()?;
-
-    if !status.success() {
-        bail!("Failed to create sources JAR");
-    }
-
+    zip.finish()?;
     Ok(jar_path)
 }
 
@@ -572,7 +573,6 @@ fn generate_javadoc_jar(project: &Path, cfg: &config::schema::YmConfig, version_
 }
 
 fn find_output_jar(project: &Path, cfg: &config::schema::YmConfig, version_override: Option<&str>) -> Result<std::path::PathBuf> {
-    // For release builds, we should create a JAR from out/classes
     let classes_dir = config::output_classes_dir(project);
     let jar_name = format!(
         "{}-{}.jar",
@@ -580,20 +580,28 @@ fn find_output_jar(project: &Path, cfg: &config::schema::YmConfig, version_overr
         version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0")
     );
     let jar_path = project.join("out").join(&jar_name);
-
-    // Create JAR using jar command
-    let status = std::process::Command::new("jar")
-        .arg("cf")
-        .arg(&jar_path)
-        .arg("-C")
-        .arg(&classes_dir)
-        .arg(".")
-        .status()?;
-
-    if !status.success() {
-        bail!("Failed to create JAR");
+    if let Some(parent) = jar_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
 
+    let file = std::fs::File::create(&jar_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    if classes_dir.exists() {
+        for entry in walkdir::WalkDir::new(&classes_dir).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() {
+                let rel = path.strip_prefix(&classes_dir).unwrap_or(path);
+                zip.start_file(rel.to_string_lossy(), options)?;
+                let mut f = std::fs::File::open(path)?;
+                std::io::copy(&mut f, &mut zip)?;
+            }
+        }
+    }
+
+    zip.finish()?;
     Ok(jar_path)
 }
 
@@ -800,6 +808,35 @@ fn upload_artifact(
     creds: &Credentials,
     version_override: Option<&str>,
 ) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("ym/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let gpg_available = check_gpg_available();
+    upload_artifact_with(jar_path, pom_path, sources_jar_path, javadoc_jar_path, cfg, registry, creds, version_override, &client, gpg_available)
+}
+
+fn check_gpg_available() -> bool {
+    std::process::Command::new("gpg")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn upload_artifact_with(
+    jar_path: &Path,
+    pom_path: &Path,
+    sources_jar_path: &Path,
+    javadoc_jar_path: Option<&Path>,
+    cfg: &config::schema::YmConfig,
+    registry: &str,
+    creds: &Credentials,
+    version_override: Option<&str>,
+    client: &reqwest::blocking::Client,
+    gpg_available: bool,
+) -> Result<()> {
     let group_id = &cfg.group_id;
     let artifact_id = &cfg.name;
     let version = version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0");
@@ -808,19 +845,6 @@ fn upload_artifact(
         "{}/{}/{}/{}",
         registry, group_path, artifact_id, version
     );
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("ym/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-
-    // Check if GPG is available for signing
-    let gpg_available = std::process::Command::new("gpg")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
 
     // Upload POM + checksums + signature
     let pom_url = format!("{}/{}-{}.pom", base_url, artifact_id, version);
