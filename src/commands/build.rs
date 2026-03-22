@@ -1004,15 +1004,9 @@ fn build_library_jar(project: &Path, cfg: &YmConfig, root_version: Option<&str>)
 
     let pack_start = Instant::now();
 
-    // Build JAR from classes + resources using jar command
+    // Build JAR from out/classes (already includes copied resources)
     let mut cmd = std::process::Command::new("jar");
     cmd.arg("cf").arg(&jar_path).arg("-C").arg(&classes_dir).arg(".");
-
-    // Include src/main/resources if present
-    let resources_dir = project.join("src").join("main").join("resources");
-    if resources_dir.exists() {
-        cmd.arg("-C").arg(&resources_dir).arg(".");
-    }
 
     let status = cmd.status()?;
     if !status.success() {
