@@ -892,7 +892,10 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
                     size_str,
                 );
             } else {
-                if pkg.path.join("ym.config.java").exists() {
+                if pkg.config.main.is_none() {
+                    // Library module: thin JAR (only own classes + resources)
+                    build_library_jar(&pkg.path, &pkg.config, root_cfg.version.as_deref())?;
+                } else if pkg.path.join("ym.config.java").exists() {
                     build_with_plugins(&pkg.path, &pkg.config, &all_deps, root_cfg.version.as_deref())?;
                 } else {
                     build_release_jar(&pkg.path, &pkg.config, &all_deps, None, root_cfg.version.as_deref())?;
@@ -968,6 +971,59 @@ fn print_compile_result(name: &str, result: &compiler::CompileResult, elapsed: s
             );
         }
     }
+}
+
+/// Build a thin library JAR containing only the module's own classes and resources.
+fn build_library_jar(project: &Path, cfg: &YmConfig, root_version: Option<&str>) -> Result<()> {
+    let classes_dir = config::output_classes_dir(project);
+    let release_dir = project.join("out").join("release");
+    std::fs::create_dir_all(&release_dir)?;
+
+    let effective_version = cfg.version.as_deref()
+        .or(root_version)
+        .unwrap_or("0.0.0");
+    let jar_name = format!("{}-{}.jar", cfg.name, effective_version);
+    let jar_path = release_dir.join(&jar_name);
+
+    let pack_start = Instant::now();
+
+    // Build JAR from classes + resources using jar command
+    let mut cmd = std::process::Command::new("jar");
+    cmd.arg("cf").arg(&jar_path).arg("-C").arg(&classes_dir).arg(".");
+
+    // Include src/main/resources if present
+    let resources_dir = project.join("src").join("main").join("resources");
+    if resources_dir.exists() {
+        cmd.arg("-C").arg(&resources_dir).arg(".");
+    }
+
+    let status = cmd.status()?;
+    if !status.success() {
+        bail!("Failed to create library JAR for {}", cfg.name);
+    }
+
+    let jar_size = std::fs::metadata(&jar_path).map(|m| m.len()).unwrap_or(0);
+    let size_str = if jar_size >= 1024 * 1024 {
+        format!("{:.1} MB", jar_size as f64 / (1024.0 * 1024.0))
+    } else if jar_size >= 1024 {
+        format!("{:.1} KB", jar_size as f64 / 1024.0)
+    } else {
+        format!("{} B", jar_size)
+    };
+    println!(
+        "{} {} ({}) {:>10}",
+        style(format!("{:>12}", "Packaging")).green().bold(),
+        jar_name,
+        size_str,
+        style(format!("{:.0}ms", pack_start.elapsed().as_millis())).dim()
+    );
+    println!(
+        "{} {}",
+        style(format!("{:>12}", "→")).dim(),
+        style(release_dir.display()).dim()
+    );
+
+    Ok(())
 }
 
 /// Build a Spring Boot nested JAR (executable) containing loader classes at the root,
