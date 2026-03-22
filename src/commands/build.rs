@@ -465,6 +465,20 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
         }
     }
 
+    // Pre-warm compiler worker pool in background during dependency resolution.
+    // Worker JVM startup (3-5s per worker) overlaps with dep resolution (8s+).
+    let pool_size = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(packages.len());
+    let pool_handle = if packages.len() > 1 {
+        Some(std::thread::spawn(move || {
+            compiler::worker::CompilerPool::new(pool_size).ok()
+        }))
+    } else {
+        None
+    };
+
     // Workspace-level dependency resolution
     let dep_start = Instant::now();
 
@@ -564,20 +578,10 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
         }
     }
 
-    // Create compiler worker pool (warm JVM instances for parallel compilation)
-    let pool_size = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(packages.len())
-        .min(8);
-    let worker_pool = if packages.len() > 1 {
-        match compiler::worker::CompilerPool::new(pool_size) {
-            Ok(p) => Some(p),
-            Err(_) => None, // Fall back to direct javac silently
-        }
-    } else {
-        None
-    };
+    // Collect pre-warmed compiler worker pool (started during dependency resolution)
+    let worker_pool = pool_handle
+        .and_then(|h| h.join().ok())
+        .flatten();
 
     let mut workspace_classpath: Vec<PathBuf> = Vec::new();
     let mut failed_modules: Vec<String> = Vec::new();
