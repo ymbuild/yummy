@@ -634,12 +634,11 @@ fn compute_build_cache_key(config: &super::CompileConfig, source_files: &[PathBu
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Build cache directory: ~/.ym/cache/build-cache/{key}/
+/// Build cache directory: ~/.ym/build-cache/{key}/
 fn build_cache_dir(key: &str) -> PathBuf {
     crate::home_dir()
-        .join(".ym")
-        .join("cache")
-        .join("build-cache")
+        .join(crate::config::CACHE_DIR)
+        .join(crate::config::BUILD_CACHE_DIR)
         .join(key)
 }
 

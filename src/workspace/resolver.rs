@@ -1065,12 +1065,11 @@ fn resolve_transitive_cached(
         }
     }
 
-    // Check on-disk POM cache (.ym/pom-cache/)
+    // Check on-disk POM cache (~/.ym/pom-cache/)
     let pom_cache_dir = cache_dir
-        .parent()  // up from maven/ to cache/
-        .and_then(|p| p.parent())  // up from cache/ to .ym/
+        .parent()  // up from maven/ to .ym/
         .unwrap_or(cache_dir)
-        .join("pom-cache");
+        .join(crate::config::POM_CACHE_DIR);
     let pom_cache_file = pom_cache_dir
         .join(&coord.group_id)
         .join(&coord.artifact_id)

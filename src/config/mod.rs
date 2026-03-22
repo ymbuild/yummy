@@ -11,6 +11,9 @@ pub const CLASSES_DIR: &str = "classes";
 pub const TEST_CLASSES_DIR: &str = "test-classes";
 pub const SOURCE_DIR: &str = "src";
 pub const RESOLVED_FILE: &str = "resolved.json";
+pub const MAVEN_CACHE_DIR: &str = "maven";
+pub const BUILD_CACHE_DIR: &str = "build-cache";
+pub const POM_CACHE_DIR: &str = "pom-cache";
 
 /// Search upward from `start` for an ym.json file
 pub fn find_config(start: &Path) -> Option<PathBuf> {
@@ -174,6 +177,6 @@ pub fn cache_dir(project: &Path) -> PathBuf {
 pub fn maven_cache_dir(_project: &Path) -> PathBuf {
     dirs::home_dir()
         .expect("Cannot determine home directory")
-        .join(".ym")
-        .join("caches")
+        .join(CACHE_DIR)
+        .join(MAVEN_CACHE_DIR)
 }
