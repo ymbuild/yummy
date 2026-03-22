@@ -661,11 +661,18 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
             .par_iter()
             .map(|pkg_name| {
                 // Per-module fingerprint shortcut: skip compile_project() if unchanged
+                // Also verify output directory exists and is non-empty to avoid stale cache hits
                 if let (Some(current), Some(stored)) = (
                     current_module_fps.get(pkg_name.as_str()),
                     stored_module_fps.get(pkg_name.as_str()),
                 ) {
-                    if current == stored {
+                    let pkg = ws.get_package(pkg_name.as_str()).unwrap();
+                    let out_dir = config::output_classes_dir(&pkg.path);
+                    let has_output = out_dir.exists()
+                        && std::fs::read_dir(&out_dir)
+                            .map(|mut d| d.next().is_some())
+                            .unwrap_or(false);
+                    if current == stored && has_output {
                         return (pkg_name.to_string(), Ok(compiler::CompileResult {
                             success: true,
                             outcome: compiler::CompileOutcome::UpToDate,
@@ -686,6 +693,10 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
                         let compiler = module_cfg.compiler.get_or_insert_with(Default::default);
                         compiler.args = Some(args);
                     }
+                }
+                // Inherit devDependencies from workspace root for annotation processor auto-discovery
+                if module_cfg.dev_dependencies.is_none() {
+                    module_cfg.dev_dependencies = root_cfg_snapshot.dev_dependencies.clone();
                 }
                 let result = compile_project_with_pool(&pkg.path, &module_cfg, &classpath, worker_pool.as_ref());
                 (pkg_name.to_string(), result, start.elapsed())
@@ -2145,17 +2156,18 @@ fn should_skip_workspace_build(root: &Path, targets: &[String], fingerprint: &st
     let fp_path = workspace_build_fp_path(root, targets);
     match std::fs::read_to_string(&fp_path) {
         Ok(stored) if stored.trim() == fingerprint => {
-            // Verify at least one module's out/classes dir exists
-            let any_output = packages.iter().any(|name| {
-                ws.get_package(name).map_or(false, |pkg| {
-                    pkg.path.join(config::OUTPUT_DIR).join(config::CLASSES_DIR).exists()
+            // Verify ALL modules have out/classes dir — if any is missing, rebuild
+            let all_output = packages.iter().all(|name| {
+                ws.get_package(name).map_or(true, |pkg| {
+                    let out = pkg.path.join(config::OUTPUT_DIR).join(config::CLASSES_DIR);
+                    out.exists() && std::fs::read_dir(&out).map(|mut d| d.next().is_some()).unwrap_or(false)
                 })
             });
-            if !any_output {
+            if !all_output {
                 eprintln!("  {} Stale build fingerprint (output dirs missing), rebuilding...",
                     console::style("!").yellow());
             }
-            any_output
+            all_output
         }
         _ => false,
     }
@@ -2735,7 +2747,15 @@ fn resolve_annotation_processors(project: &Path, cfg: &YmConfig, classpath: &[Pa
     // Auto-discover: only look in devDependencies jars (like Gradle's annotationProcessor config).
     // This prevents compile-scope jars (e.g. auto-service via selenium) from being accidentally
     // loaded as annotation processors when their own dependencies aren't on the processor path.
-    let dev_artifact_ids = collect_dev_dependency_artifact_ids(cfg);
+    let mut dev_artifact_ids = collect_dev_dependency_artifact_ids(cfg);
+    // Inherit workspace root devDependencies if module has none
+    if dev_artifact_ids.is_empty() {
+        if let Some(ws_root) = config::find_workspace_root(project) {
+            if let Ok(root_cfg) = config::load_config(&ws_root.join(config::CONFIG_FILE)) {
+                dev_artifact_ids = collect_dev_dependency_artifact_ids(&root_cfg);
+            }
+        }
+    }
     if dev_artifact_ids.is_empty() {
         return Ok(vec![]);
     }

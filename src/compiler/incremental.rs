@@ -448,17 +448,12 @@ pub fn incremental_compile(
             .unwrap_or(false);
 
     let files_to_compile = if !has_classes {
-        // Check if all source files were previously compiled with no class output
-        // (entirely commented-out modules). Skip full recompile in this case.
-        let all_have_fingerprints = !all_files.is_empty() && all_files.iter().all(|f| {
-            fingerprints.entries.contains_key(&crate::normalize_cache_path(f))
-        });
-        if all_have_fingerprints && changed.is_empty() {
-            return Ok(super::CompileResult {
-                success: true,
-                outcome: super::CompileOutcome::UpToDate,
-                errors: String::new(),
-            });
+        // Output directory missing or empty — clear stale fingerprints and force full compile.
+        // Previous logic skipped recompile when all files had fingerprints (assuming "no-output
+        // module"), but this also triggered when output was deleted (e.g. ym clean).
+        if !fingerprints.entries.is_empty() {
+            fingerprints.entries.clear();
+            fingerprints.save(&fp_dir);
         }
         // Full compile needed — try build cache first
         if !all_files.is_empty() {
