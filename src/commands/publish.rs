@@ -710,6 +710,14 @@ fn find_output_jar(project: &Path, cfg: &config::schema::YmConfig, version_overr
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
+    // Add META-INF/MANIFEST.MF (required for Spring Boot nested JAR scanning)
+    let version_str = version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0");
+    zip.start_file("META-INF/MANIFEST.MF", options)?;
+    std::io::Write::write_all(&mut zip, format!(
+        "Manifest-Version: 1.0\nImplementation-Title: {}\nImplementation-Version: {}\nBuilt-By: ym\n",
+        cfg.name, version_str
+    ).as_bytes())?;
+
     if classes_dir.exists() {
         for entry in walkdir::WalkDir::new(&classes_dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();

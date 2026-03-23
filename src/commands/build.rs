@@ -1796,6 +1796,14 @@ fn package_thin_jar(project: &Path, cfg: &config::schema::YmConfig, version: &st
     let mut zos = zip::ZipWriter::new(std::io::BufWriter::new(jar_file));
     let zip_options = zip::write::SimpleFileOptions::default();
 
+    // Add META-INF/MANIFEST.MF (required for Spring Boot nested JAR scanning)
+    zos.add_directory("META-INF/", zip_options)?;
+    zos.start_file("META-INF/MANIFEST.MF", zip_options)?;
+    std::io::Write::write_all(&mut zos, format!(
+        "Manifest-Version: 1.0\nImplementation-Title: {}\nImplementation-Version: {}\nBuilt-By: ym\n",
+        cfg.name, version
+    ).as_bytes())?;
+
     // Add classes
     if classes_dir.exists() {
         for entry in walkdir::WalkDir::new(&classes_dir) {
