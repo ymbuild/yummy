@@ -1588,6 +1588,50 @@ fn build_release_jar_flat(project: &Path, cfg: &YmConfig, jars: &[PathBuf], outp
 /// 通过插件系统执行打包。
 /// 解析 plugins，下载插件 JAR，启动 JVM 执行 ConfigRunner，
 /// 由插件决定如何打包（Spring Boot JAR、fat JAR 等）。
+/// Ensure spring-boot-loader JAR is downloaded to Maven cache.
+/// Called before plugin-based packaging so the plugin can find it.
+fn ensure_spring_boot_loader(jars: &[PathBuf]) {
+    // Detect spring-boot version from spring-boot-autoconfigure JAR
+    let version = jars.iter().find_map(|j| {
+        let name = j.file_name()?.to_string_lossy().to_string();
+        let prefix = "spring-boot-autoconfigure-";
+        if name.starts_with(prefix) && name.ends_with(".jar") {
+            Some(name[prefix.len()..name.len() - 4].to_string())
+        } else {
+            None
+        }
+    });
+    if let Some(ver) = version {
+        let cache_dir = dirs::home_dir()
+            .expect("Cannot determine home directory")
+            .join(crate::config::CACHE_DIR)
+            .join(crate::config::MAVEN_CACHE_DIR)
+            .join("org.springframework.boot")
+            .join("spring-boot-loader");
+        let candidate = cache_dir.join(&ver).join(format!("spring-boot-loader-{}.jar", ver));
+        if !candidate.exists() {
+            let url = format!(
+                "https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-loader/{}/spring-boot-loader-{}.jar",
+                ver, ver
+            );
+            let dest_dir = cache_dir.join(&ver);
+            let _ = std::fs::create_dir_all(&dest_dir);
+            println!(
+                "{} spring-boot-loader-{}.jar from Maven Central",
+                style(format!("{:>12}", "Downloading")).green().bold(),
+                ver
+            );
+            if let Ok(resp) = reqwest::blocking::get(&url) {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes() {
+                        let _ = std::fs::write(&candidate, &bytes);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn build_with_plugins(
     project: &Path,
     cfg: &YmConfig,
@@ -1606,6 +1650,9 @@ pub fn build_with_plugins(
         style(format!("{:>12}", "Packaging")).green().bold(),
         jar_name,
     );
+
+    // Pre-download spring-boot-loader if not cached (needed by spring-boot plugin)
+    ensure_spring_boot_loader(runtime_jars);
 
     // 收集插件 JAR 的 classpath
     let plugin_cp = resolve_plugin_classpath(project, cfg)?;
