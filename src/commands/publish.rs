@@ -488,25 +488,39 @@ fn generate_pom(
                 continue;
             }
 
-            if !crate::config::schema::is_maven_dep(coord) || value.is_workspace() {
+            if !crate::config::schema::is_maven_dep(coord) {
                 continue;
             }
-            let raw_version = match value.version() {
-                Some(v) => v,
-                None => continue,
-            };
-            // Resolve ${project.version}, ${ext.*} and other variables
-            let version = if let Some(ref root) = root_cfg {
-                config::schema::YmConfig::resolve_var(raw_version, root)
+            // Resolve version: direct or inherited from workspace root
+            let version = if value.is_workspace() {
+                // { workspace: true } → inherit version from root config's dependencies
+                if let Some(ref root) = root_cfg {
+                    match root.find_dep_version(coord) {
+                        Some(v) => config::schema::YmConfig::resolve_var(v, root),
+                        None => continue,
+                    }
+                } else {
+                    continue;
+                }
             } else {
-                raw_version.to_string()
+                let raw_version = match value.version() {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if let Some(ref root) = root_cfg {
+                    config::schema::YmConfig::resolve_var(raw_version, root)
+                } else {
+                    raw_version.to_string()
+                }
             };
             let scope = value.scope();
             // Test-scoped deps are NOT written to POM (per spec)
             if scope == "test" {
                 continue;
             }
-            let resolved = cfg.resolve_key(coord);
+            let resolved = root_cfg.as_ref()
+                .map(|root| root.resolve_key(coord))
+                .unwrap_or_else(|| cfg.resolve_key(coord));
             let parts: Vec<&str> = resolved.split(':').collect();
             if parts.len() == 2 {
                 let scope_xml = match scope {

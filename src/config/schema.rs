@@ -614,7 +614,7 @@ impl YmConfig {
     }
 
     /// Look up a dependency version in both `[dependencies]` and `[devDependencies]`.
-    fn find_dep_version(&self, key: &str) -> Option<&str> {
+    pub fn find_dep_version(&self, key: &str) -> Option<&str> {
         self.dependencies.as_ref()
             .and_then(|d| d.get(key))
             .and_then(|v| v.version())
