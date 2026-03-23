@@ -719,11 +719,30 @@ fn find_output_jar(project: &Path, cfg: &config::schema::YmConfig, version_overr
     ).as_bytes())?;
 
     if classes_dir.exists() {
+        let mut added_dirs = std::collections::HashSet::new();
         for entry in walkdir::WalkDir::new(&classes_dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.is_file() {
-                let rel = path.strip_prefix(&classes_dir).unwrap_or(path);
-                zip.start_file(rel.to_string_lossy(), options)?;
+            let rel = path.strip_prefix(&classes_dir).unwrap_or(path);
+            let name = rel.to_string_lossy().replace('\\', "/");
+            if name.is_empty() { continue; }
+            if path.is_dir() {
+                let dir_name = if name.ends_with('/') { name } else { format!("{}/", name) };
+                if added_dirs.insert(dir_name.clone()) {
+                    zip.add_directory(&dir_name, options)?;
+                }
+            } else {
+                // Ensure parent directories exist
+                if let Some(parent) = rel.parent() {
+                    let mut dir = String::new();
+                    for component in parent.components() {
+                        dir.push_str(&component.as_os_str().to_string_lossy());
+                        dir.push('/');
+                        if added_dirs.insert(dir.clone()) {
+                            zip.add_directory(&dir, options)?;
+                        }
+                    }
+                }
+                zip.start_file(&name, options)?;
                 let mut f = std::fs::File::open(path)?;
                 std::io::copy(&mut f, &mut zip)?;
             }
