@@ -1792,39 +1792,7 @@ fn package_thin_jar(project: &Path, cfg: &config::schema::YmConfig, version: &st
         }
     }
 
-    let jar_file = std::fs::File::create(&jar_path)?;
-    let mut zos = zip::ZipWriter::new(std::io::BufWriter::new(jar_file));
-    let zip_options = zip::write::SimpleFileOptions::default();
-
-    // Add META-INF/MANIFEST.MF (required for Spring Boot nested JAR scanning)
-    zos.add_directory("META-INF/", zip_options)?;
-    zos.start_file("META-INF/MANIFEST.MF", zip_options)?;
-    std::io::Write::write_all(&mut zos, format!(
-        "Manifest-Version: 1.0\nImplementation-Title: {}\nImplementation-Version: {}\nBuilt-By: ym\n",
-        cfg.name, version
-    ).as_bytes())?;
-
-    // Add classes
-    if classes_dir.exists() {
-        for entry in walkdir::WalkDir::new(&classes_dir) {
-            let entry = entry?;
-            let path = entry.path();
-            let relative = path.strip_prefix(&classes_dir)?;
-            let name = relative.to_string_lossy().replace('\\', "/");
-            if name.is_empty() { continue; }
-
-            if entry.file_type().is_dir() {
-                let dir_name = if name.ends_with('/') { name } else { format!("{}/", name) };
-                zos.add_directory(dir_name, zip_options)?;
-            } else {
-                zos.start_file(&name, zip_options)?;
-                let mut f = std::fs::File::open(path)?;
-                std::io::copy(&mut f, &mut zos)?;
-            }
-        }
-    }
-
-    zos.finish()?;
+    write_classes_jar(&jar_path, &classes_dir, &cfg.name, version)?;
     Ok(jar_path)
 }
 
@@ -3191,4 +3159,51 @@ pub fn resolve_lib_dirs(project: &Path, cfg: &YmConfig) -> Vec<PathBuf> {
         }
     }
     jars
+}
+
+/// Write a standard JAR from a classes directory, including META-INF/MANIFEST.MF
+/// and proper directory entries (required for Spring Boot nested JAR scanning).
+pub fn write_classes_jar(
+    jar_path: &Path,
+    classes_dir: &Path,
+    name: &str,
+    version: &str,
+) -> anyhow::Result<()> {
+    let jar_file = std::fs::File::create(jar_path)?;
+    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(jar_file));
+    let options = zip::write::SimpleFileOptions::default();
+
+    // META-INF/MANIFEST.MF
+    zip.add_directory("META-INF/", options)?;
+    zip.start_file("META-INF/MANIFEST.MF", options)?;
+    std::io::Write::write_all(&mut zip, format!(
+        "Manifest-Version: 1.0\nImplementation-Title: {}\nImplementation-Version: {}\nBuilt-By: ym\n",
+        name, version
+    ).as_bytes())?;
+
+    // Classes + directory entries
+    if classes_dir.exists() {
+        let mut added_dirs = std::collections::HashSet::new();
+        for entry in walkdir::WalkDir::new(classes_dir) {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path.strip_prefix(classes_dir)?;
+            let name = rel.to_string_lossy().replace('\\', "/");
+            if name.is_empty() { continue; }
+
+            if entry.file_type().is_dir() {
+                let dir_name = if name.ends_with('/') { name } else { format!("{}/", name) };
+                if added_dirs.insert(dir_name.clone()) {
+                    zip.add_directory(&dir_name, options)?;
+                }
+            } else {
+                zip.start_file(&name, options)?;
+                let mut f = std::fs::File::open(path)?;
+                std::io::copy(&mut f, &mut zip)?;
+            }
+        }
+    }
+
+    zip.finish()?;
+    Ok(())
 }
