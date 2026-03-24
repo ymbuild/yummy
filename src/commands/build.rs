@@ -901,6 +901,9 @@ fn build_workspace(root: &Path, root_cfg: &YmConfig, targets: &[String], package
     print_workspace_summary(compiled_count, cached_count, up_to_date_count,
         0, skipped_count, total_start.elapsed());
 
+    // Evict stale build cache entries (>30 days unused)
+    compiler::incremental::evict_stale_build_cache();
+
     } // end of content-addressed cache block
 
     if package {

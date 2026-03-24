@@ -1122,6 +1122,43 @@ pub fn save_module_cache(
     Ok(())
 }
 
+const CACHE_MAX_AGE_DAYS: u64 = 30;
+
+/// Evict build cache entries not accessed in the last N days.
+/// Runs after successful builds; errors are silently ignored to never block compilation.
+pub fn evict_stale_build_cache() {
+    let cache_root = crate::home_dir()
+        .join(crate::config::CACHE_DIR)
+        .join(crate::config::BUILD_CACHE_DIR);
+
+    let entries = match std::fs::read_dir(&cache_root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let cutoff = cache_timestamp().saturating_sub(CACHE_MAX_AGE_DAYS * 86400);
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Use meta.json mtime as last-accessed indicator
+        let meta = path.join("meta.json");
+        let mtime = std::fs::metadata(&meta)
+            .or_else(|_| std::fs::metadata(&path))
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if mtime < cutoff {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
