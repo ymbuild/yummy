@@ -397,98 +397,97 @@ fn run_tests(
     };
 
     if let Some(launcher) = junit_launcher {
-        let mut cmd = Command::new("java");
+        // Use JVM @argfile to avoid OS command-line length limits (E2BIG).
+        // All arguments are written to a temp file, then passed as `java @file`.
+        // This is the same approach used by IntelliJ IDEA and Gradle.
+        let mut args: Vec<String> = Vec::new();
 
         if let Some(ref agent_jar) = jacoco_agent {
             let report_dir = project.join("out").join("coverage");
             std::fs::create_dir_all(&report_dir).ok();
             let exec_file = report_dir.join("jacoco.exec");
-            cmd.arg(format!(
+            args.push(format!(
                 "-javaagent:{}=destfile={}",
                 agent_jar.display(),
                 exec_file.display()
             ));
         }
 
-        cmd.arg("-jar")
-            .arg(launcher)
-            .arg("--class-path")
-            .arg(&cp);
+        args.push("-jar".into());
+        args.push(launcher.to_string_lossy().into());
+        args.push("--class-path".into());
+        args.push(cp.clone());
 
         if verbose {
-            cmd.arg("--details").arg("verbose");
+            args.push("--details".into());
+            args.push("verbose".into());
         }
 
         if fail_fast {
-            cmd.arg("--fail-if-no-tests")
-                .arg("-c")
-                .arg("junit.jupiter.execution.order.random.seed=0");
+            args.push("--fail-if-no-tests".into());
+            args.push("-c".into());
+            args.push("junit.jupiter.execution.order.random.seed=0".into());
         }
 
         if let Some(secs) = timeout {
-            cmd.arg("-c")
-                .arg(format!("junit.jupiter.execution.timeout.default={}s", secs));
+            args.push("-c".into());
+            args.push(format!("junit.jupiter.execution.timeout.default={}s", secs));
         }
 
         if parallel {
-            cmd.arg("-c")
-                .arg("junit.jupiter.execution.parallel.enabled=true")
-                .arg("-c")
-                .arg("junit.jupiter.execution.parallel.mode.default=concurrent");
-            // Integration tests run sequentially by default
+            args.push("-c".into());
+            args.push("junit.jupiter.execution.parallel.enabled=true".into());
+            args.push("-c".into());
+            args.push("junit.jupiter.execution.parallel.mode.default=concurrent".into());
             match test_mode {
                 TestMode::Integration => {}
                 _ => {
-                    cmd.arg("-c")
-                        .arg("junit.jupiter.execution.parallel.mode.classes.default=concurrent");
+                    args.push("-c".into());
+                    args.push("junit.jupiter.execution.parallel.mode.classes.default=concurrent".into());
                 }
             }
         }
 
         if let Some(pattern) = filter {
             if pattern.contains('#') {
-                // Method-level filter: TestClass#method → --select-method
-                cmd.arg("--select-method").arg(pattern);
+                args.push("--select-method".into());
+                args.push(pattern.to_string());
             } else {
-                cmd.arg("--include-classname").arg(format!(".*{}.*", pattern));
+                args.push("--include-classname".into());
+                args.push(format!(".*{}.*", pattern));
             }
         }
 
-        // Test mode filtering
         match test_mode {
             TestMode::Unit => {
-                // Exclude integration tests
-                cmd.arg("--exclude-classname").arg(".*IT$");
-                cmd.arg("--exclude-classname").arg(".*IntegrationTest$");
+                args.push("--exclude-classname".into());
+                args.push(".*IT$".into());
+                args.push("--exclude-classname".into());
+                args.push(".*IntegrationTest$".into());
             }
             TestMode::Integration => {
-                // Only integration tests
-                cmd.arg("--include-classname").arg(".*IT$|.*IntegrationTest$");
+                args.push("--include-classname".into());
+                args.push(".*IT$|.*IntegrationTest$".into());
             }
-            TestMode::All => {
-                // No filtering — run everything
-            }
+            TestMode::All => {}
         }
 
-        // JUnit @Tag filtering
         if let Some(t) = tag {
-            cmd.arg("--include-tag").arg(t);
+            args.push("--include-tag".into());
+            args.push(t.to_string());
         }
         if let Some(t) = exclude_tag {
-            cmd.arg("--exclude-tag").arg(t);
+            args.push("--exclude-tag".into());
+            args.push(t.to_string());
         }
 
-        // Generate test reports if requested
         if let Some(report_type) = report {
             let reports_dir = project.join("out").join("test-reports");
             std::fs::create_dir_all(&reports_dir).ok();
             match report_type {
-                "junit-xml" | "xml" => {
-                    cmd.arg("--reports-dir").arg(&reports_dir);
-                }
-                "html" => {
-                    // Generate XML first, then convert to HTML after tests run
-                    cmd.arg("--reports-dir").arg(&reports_dir);
+                "junit-xml" | "xml" | "html" => {
+                    args.push("--reports-dir".into());
+                    args.push(reports_dir.to_string_lossy().into());
                 }
                 _ => {
                     eprintln!(
@@ -500,10 +499,17 @@ fn run_tests(
             }
         }
 
-        // Only scan test-classes dir (not dependency JARs on the classpath)
-        cmd.arg("--scan-class-path").arg(&test_out_dir);
+        args.push("--scan-class-path".into());
+        args.push(test_out_dir.to_string_lossy().into());
 
-        let status = cmd.status()?;
+        // Write @argfile
+        let argfile = project.join("out").join(".ym-test-args.txt");
+        std::fs::create_dir_all(argfile.parent().unwrap()).ok();
+        std::fs::write(&argfile, args.join("\n"))?;
+
+        let status = Command::new("java")
+            .arg(format!("@{}", argfile.display()))
+            .status()?;
 
         // Print report location if generated
         if let Some(report_type) = report {
@@ -537,16 +543,21 @@ fn run_tests(
             bail!("Tests failed");
         }
     } else {
-        // Fallback: run test classes directly
+        // Fallback: run test classes directly via @argfile
         let mut failures = 0;
         for class in &test_classes {
             println!("  running {}...", style(class).cyan());
+            let fb_argfile = project.join("out").join(".ym-test-fb-args.txt");
+            let fb_args = vec![
+                "-cp".to_string(),
+                cp.clone(),
+                "org.junit.platform.console.ConsoleLauncher".to_string(),
+                "--select-class".to_string(),
+                class.clone(),
+            ];
+            std::fs::write(&fb_argfile, fb_args.join("\n")).ok();
             let status = Command::new("java")
-                .arg("-cp")
-                .arg(&cp)
-                .arg("org.junit.platform.console.ConsoleLauncher")
-                .arg("--select-class")
-                .arg(class)
+                .arg(format!("@{}", fb_argfile.display()))
                 .status();
 
             match status {
@@ -902,43 +913,64 @@ fn test_workspace(
         .join(sep);
 
     // Ensure JUnit Platform Console standalone launcher is available
+    // Ensure JUnit Platform Console standalone launcher is available
     let junit_launcher = ensure_junit_launcher(&classpath_jars, &target_pkg.path);
-
     if let Some(launcher) = junit_launcher {
-        let mut cmd = std::process::Command::new("java");
-        cmd.arg("-jar").arg(launcher).arg("--class-path").arg(&cp);
+        let mut args: Vec<String> = Vec::new();
+        args.push("-jar".into());
+        args.push(launcher.to_string_lossy().into());
+        // JUnit 6+ requires 'execute' subcommand
+        let launcher_name = launcher.file_name().unwrap_or_default().to_string_lossy();
+        if launcher_name.contains("-6.") || launcher_name.contains("-7.") || launcher_name.contains("-8.") || launcher_name.contains("-9.") {
+            args.push("execute".into());
+        }
+        args.push("--class-path".into());
+        args.push(cp.clone());
         if verbose {
-            cmd.arg("--details").arg("verbose");
+            args.push("--details".into());
+            args.push("verbose".into());
         }
         if fail_fast {
-            cmd.arg("--fail-if-no-tests");
+            args.push("--fail-if-no-tests".into());
         }
         if parallel {
-            cmd.arg("-c")
-                .arg("junit.jupiter.execution.parallel.enabled=true")
-                .arg("-c")
-                .arg("junit.jupiter.execution.parallel.mode.default=concurrent")
-                .arg("-c")
-                .arg("junit.jupiter.execution.parallel.mode.classes.default=concurrent");
+            args.push("-c".into());
+            args.push("junit.jupiter.execution.parallel.enabled=true".into());
+            args.push("-c".into());
+            args.push("junit.jupiter.execution.parallel.mode.default=concurrent".into());
+            args.push("-c".into());
+            args.push("junit.jupiter.execution.parallel.mode.classes.default=concurrent".into());
         }
         if let Some(ref pattern) = filter {
-            cmd.arg("--include-classname")
-                .arg(format!(".*{}.*", pattern));
+            args.push("--include-classname".into());
+            args.push(format!(".*{}.*", pattern));
         }
-        // Only scan test-classes dir (not dependency JARs)
         let ws_test_out = config::output_test_classes_dir(&target_pkg.path);
-        cmd.arg("--scan-class-path").arg(&ws_test_out);
-        let status = cmd.status()?;
+        args.push("--scan-class-path".into());
+        args.push(ws_test_out.to_string_lossy().into());
+
+        let argfile = target_pkg.path.join("out").join(".ym-test-args.txt");
+        std::fs::create_dir_all(argfile.parent().unwrap()).ok();
+        std::fs::write(&argfile, args.join("\n"))?;
+
+        let status = std::process::Command::new("java")
+            .arg(format!("@{}", argfile.display()))
+            .status()?;
         if !status.success() {
             bail!("Tests failed");
         }
     } else {
         for class in &test_classes {
             println!("  running {}...", style(class).cyan());
+            let fb_argfile = target_pkg.path.join("out").join(".ym-test-fb-args.txt");
+            let fb_args = vec![
+                "-cp".to_string(),
+                cp.clone(),
+                class.clone(),
+            ];
+            std::fs::write(&fb_argfile, fb_args.join("\n")).ok();
             let status = std::process::Command::new("java")
-                .arg("-cp")
-                .arg(&cp)
-                .arg(class)
+                .arg(format!("@{}", fb_argfile.display()))
                 .status();
             match status {
                 Ok(s) if s.success() => println!("  {} {}", style("✓").green(), class),
