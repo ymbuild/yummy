@@ -49,10 +49,9 @@ pub fn execute(targets: Vec<String>, registry: Option<&str>, dry_run: bool, loca
         bail!("Cannot publish a private package. Remove 'private = true' from package.toml.");
     }
 
-    let version = cfg
-        .version
-        .as_deref()
-        .unwrap_or("0.0.0");
+    let Some(version) = cfg.version.as_deref() else {
+        bail!("cannot publish '{}': its ym.json declares no 'version' field", cfg.name);
+    };
 
     // Run prepublish script
     crate::scripts::run_script(&cfg, "prepublish", &project)?;
@@ -202,9 +201,12 @@ fn acquire_publish_lock(project: &Path) -> Result<std::fs::File> {
 
 /// Install a single module to local Maven cache (~/.ym/maven/).
 fn publish_single_local(project: &Path, cfg: &config::schema::YmConfig, root_version: Option<&str>) -> Result<()> {
-    let version = cfg.version.as_deref()
-        .or(root_version)
-        .unwrap_or("0.0.0");
+    let Some(version) = cfg.version.as_deref().or(root_version) else {
+        bail!(
+            "cannot install '{}' to the local cache: neither its ym.json nor the workspace root declares a 'version'",
+            cfg.name
+        );
+    };
     let cache_dir = config::maven_cache_dir();
     let dest = cache_dir
         .join(&cfg.group_id)
@@ -244,7 +246,7 @@ fn publish_all_local(config_path: &Path, workspace_root: &Path) -> Result<()> {
     super::build::execute(vec![], true)?;
 
     let root_cfg = config::load_config(config_path)?;
-    let root_version = root_cfg.version.as_deref().unwrap_or("0.0.0");
+    let root_version = root_cfg.version.as_deref();
 
     let mut modules: Vec<_> = Vec::new();
     for pkg_name in &ws.all_packages() {
@@ -268,7 +270,7 @@ fn publish_all_local(config_path: &Path, workspace_root: &Path) -> Result<()> {
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
     pool.install(|| modules.par_iter().for_each(|(module_path, module_cfg)| {
-        match publish_single_local(module_path, module_cfg, Some(root_version)) {
+        match publish_single_local(module_path, module_cfg, root_version) {
             Ok(()) => {
                 let n = installed.fetch_add(1, Ordering::Relaxed) + 1;
                 eprintln!("\r  {} Installed [{}/{}] {}", style("✓").green(), n, total, &module_cfg.name);
@@ -345,11 +347,13 @@ fn publish_all_workspace_modules(
             skipped += 1;
             continue;
         }
-        let version = pkg.config.version.as_deref()
-            .or(root_cfg.version.as_deref())
-            .unwrap_or("0.0.0")
-            .to_string();
-        modules.push((pkg.path.clone(), pkg.config.clone(), version));
+        let Some(version) = pkg.config.version.as_deref().or(root_cfg.version.as_deref()) else {
+            bail!(
+                "cannot resolve the version for module '{}': neither its ym.json nor the workspace root ym.json declares 'version'",
+                pkg_name
+            );
+        };
+        modules.push((pkg.path.clone(), pkg.config.clone(), version.to_string()));
     }
 
     let total = modules.len();
@@ -447,10 +451,14 @@ fn generate_pom(
         .and_then(|root| config::load_config(&root.join(config::CONFIG_FILE)).ok());
     let ws = ws_root
         .and_then(|root| crate::workspace::graph::WorkspaceGraph::build(&root).ok());
+    // Publish is an outward, hard-to-undo operation: a POM published with a
+    // guessed version (the old silent "0.0.0" fallback, fixed in v0.3.44 but
+    // still reachable through other fallbacks) poisons the registry for every
+    // downstream build. Every resolution failure below is therefore a hard
+    // error — never a silent fallback, never a silently dropped dependency.
     let root_version = root_cfg.as_ref()
         .and_then(|r| r.version.as_deref())
-        .or(version_override)
-        .unwrap_or("0.0.0");
+        .or(version_override);
 
     // Build dependency XML, respecting scopes (skip test scope per spec)
     let mut dep_xml = String::new();
@@ -458,19 +466,27 @@ fn generate_pom(
         for (coord, value) in deps {
             // Handle workspace module deps (not a Maven coordinate, workspace=true)
             if !crate::config::schema::is_maven_dep(coord) && value.is_workspace() {
-                if let Some(ref ws) = ws {
-                    if let Some(pkg) = ws.get_package(coord) {
-                        dep_xml.push_str(&format!(
-                            r#"    <dependency>
+                let Some(pkg) = ws.as_ref().and_then(|ws| ws.get_package(coord)) else {
+                    bail!(
+                        "workspace dependency '{}' of '{}' was not found in the workspace graph; refusing to publish a POM with a declared dependency missing",
+                        coord, cfg.name
+                    );
+                };
+                let Some(root_version) = root_version else {
+                    bail!(
+                        "cannot resolve the version for workspace dependency '{}' of '{}': the workspace root ym.json declares no 'version' and no version override was given",
+                        coord, cfg.name
+                    );
+                };
+                dep_xml.push_str(&format!(
+                    r#"    <dependency>
       <groupId>{}</groupId>
       <artifactId>{}</artifactId>
       <version>{}</version>
     </dependency>
 "#,
-                            pkg.config.group_id, pkg.config.name, root_version
-                        ));
-                    }
-                }
+                    pkg.config.group_id, pkg.config.name, root_version
+                ));
                 continue;
             }
 
@@ -480,21 +496,31 @@ fn generate_pom(
             // Resolve version: direct or inherited from workspace root
             let version = if value.is_workspace() {
                 // { workspace: true } → inherit version from root config's dependencies
-                if let Some(ref root) = root_cfg {
-                    match root.find_dep_version(coord) {
-                        Some(v) => config::schema::YmConfig::resolve_var(v, root),
-                        None => continue,
-                    }
-                } else {
-                    continue;
-                }
+                let Some(ref root) = root_cfg else {
+                    bail!(
+                        "dependency '{}' of '{}' is marked {{ workspace = true }} but no workspace root ym.json was found to inherit its version from",
+                        coord, cfg.name
+                    );
+                };
+                let Some(inherited) = root.find_dep_version(coord) else {
+                    bail!(
+                        "dependency '{}' of '{}' is marked {{ workspace = true }} but the workspace root ym.json declares no version for it",
+                        coord, cfg.name
+                    );
+                };
+                config::schema::YmConfig::resolve_var_strict(inherited, root)?
             } else {
                 let raw_version = match value.version() {
                     Some(v) => v,
                     None => continue,
                 };
                 if let Some(ref root) = root_cfg {
-                    config::schema::YmConfig::resolve_var(raw_version, root)
+                    config::schema::YmConfig::resolve_var_strict(raw_version, root)?
+                } else if raw_version.contains("${") {
+                    bail!(
+                        "dependency '{}' of '{}' uses version expression '{}' but no workspace root ym.json was found to resolve it",
+                        coord, cfg.name, raw_version
+                    );
                 } else {
                     raw_version.to_string()
                 }
@@ -528,6 +554,12 @@ fn generate_pom(
 
     let group_id = &cfg.group_id;
     let artifact_id = &cfg.name;
+    let Some(project_version) = version_override.or(cfg.version.as_deref()) else {
+        bail!(
+            "cannot resolve the version for '{}': its ym.json declares no usable 'version' and no version override was given",
+            cfg.name
+        );
+    };
 
     let pom = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -545,7 +577,7 @@ fn generate_pom(
 {dep_xml}  </dependencies>
 </project>
 "#,
-        version = version_override.or(cfg.version.as_deref()).unwrap_or("0.0.0")
+        version = project_version
     );
 
     if let Some(parent) = output.parent() {
@@ -1304,5 +1336,141 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(md5_of_file(&f).unwrap(), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fail-loud version resolution (2026-07-29 registry incident): a pre-v0.3.44
+    // ym published POMs whose workspace-internal dependency versions were the
+    // silent "0.0.0" fallback, breaking every downstream `ymc build` with
+    // "POM fetch failed for <dep>:0.0.0". The remaining silent fallbacks were
+    // then removed: publish must hard-error instead of writing a guessed
+    // version or silently dropping a declared dependency.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Writes root + core + svc where svc depends on core via { workspace: true }.
+    /// Returns (svc_path, svc_cfg).
+    fn write_workspace_with_internal_dep(
+        root: &Path,
+        root_json: &str,
+    ) -> (std::path::PathBuf, config::schema::YmConfig) {
+        std::fs::write(root.join(config::CONFIG_FILE), root_json).unwrap();
+        let core = root.join("core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join(config::CONFIG_FILE),
+            r#"{"name":"core","groupId":"com.example","version":{"workspace":true}}"#,
+        ).unwrap();
+        let svc = root.join("svc");
+        std::fs::create_dir_all(&svc).unwrap();
+        std::fs::write(
+            svc.join(config::CONFIG_FILE),
+            r#"{"name":"svc","groupId":"com.example","version":{"workspace":true},"dependencies":{"core":{"workspace":true}}}"#,
+        ).unwrap();
+        let svc_cfg = config::load_config(&svc.join(config::CONFIG_FILE)).unwrap();
+        (svc, svc_cfg)
+    }
+
+    #[test]
+    fn generate_pom_workspace_dep_inherits_root_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, svc_cfg) = write_workspace_with_internal_dep(
+            tmp.path(),
+            r#"{"name":"root","groupId":"com.example","version":"4.0.120","workspaces":["core","svc"]}"#,
+        );
+        let pom_path = svc.join("out.pom");
+        generate_pom(&svc, &svc_cfg, &pom_path, Some("4.0.120")).unwrap();
+        let pom = std::fs::read_to_string(&pom_path).unwrap();
+
+        assert!(pom.contains("<artifactId>core</artifactId>"), "internal dep must be in the POM:\n{}", pom);
+        assert!(
+            pom.contains("<version>4.0.120</version>"),
+            "internal dep must carry the workspace root version:\n{}", pom
+        );
+        assert!(!pom.contains("0.0.0"), "no silent version fallback may appear:\n{}", pom);
+    }
+
+    #[test]
+    fn generate_pom_errors_when_workspace_dep_version_unresolvable() {
+        // Root declares no version and no override is given: the old code wrote
+        // <version>0.0.0</version> into the published POM. It must error now.
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, svc_cfg) = write_workspace_with_internal_dep(
+            tmp.path(),
+            r#"{"name":"root","groupId":"com.example","workspaces":["core","svc"]}"#,
+        );
+        let pom_path = svc.join("out.pom");
+        let err = generate_pom(&svc, &svc_cfg, &pom_path, None).unwrap_err();
+        assert!(
+            err.to_string().contains("workspace dependency 'core'"),
+            "error must name the unresolvable dependency, got: {}", err
+        );
+        assert!(!pom_path.exists(), "no POM may be written on resolution failure");
+    }
+
+    #[test]
+    fn generate_pom_errors_when_workspace_dep_not_in_graph() {
+        // svc depends on core, but the workspace only lists svc: the old code
+        // silently dropped the dependency from the POM. It must error now.
+        let tmp = tempfile::tempdir().unwrap();
+        let (svc, svc_cfg) = write_workspace_with_internal_dep(
+            tmp.path(),
+            r#"{"name":"root","groupId":"com.example","version":"1.0.0","workspaces":["svc"]}"#,
+        );
+        let pom_path = svc.join("out.pom");
+        let err = generate_pom(&svc, &svc_cfg, &pom_path, Some("1.0.0")).unwrap_err();
+        assert!(
+            err.to_string().contains("not found in the workspace graph"),
+            "error must call out the missing graph entry, got: {}", err
+        );
+    }
+
+    #[test]
+    fn generate_pom_errors_on_unresolvable_placeholder_without_root() {
+        // A ${...} version expression with no workspace root to resolve it
+        // must not be written into the POM verbatim.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let cfg = write_cfg(
+            project,
+            r#"{"name":"mylib","groupId":"com.example","version":"1.0.0","dependencies":{"com.google.guava:guava":"${project.version}"}}"#,
+        );
+        let pom_path = project.join("out.pom");
+        let err = generate_pom(project, &cfg, &pom_path, None).unwrap_err();
+        assert!(
+            err.to_string().contains("${project.version}"),
+            "error must show the unresolvable expression, got: {}", err
+        );
+    }
+
+    #[test]
+    fn generate_pom_errors_when_project_version_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let cfg = write_cfg(project, r#"{"name":"mylib","groupId":"com.example"}"#);
+        let pom_path = project.join("out.pom");
+        let err = generate_pom(project, &cfg, &pom_path, None).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot resolve the version for 'mylib'"),
+            "error must name the module missing a version, got: {}", err
+        );
+    }
+
+    #[test]
+    fn resolve_var_strict_rejects_guessed_and_unresolved_versions() {
+        let root_without_version: config::schema::YmConfig =
+            serde_json::from_str(r#"{"name":"root","groupId":"com.example"}"#).unwrap();
+        let err = config::schema::YmConfig::resolve_var_strict("${project.version}", &root_without_version)
+            .unwrap_err();
+        assert!(err.to_string().contains("${project.version}"), "got: {}", err);
+
+        let root: config::schema::YmConfig =
+            serde_json::from_str(r#"{"name":"root","groupId":"com.example","version":"2.5.0"}"#).unwrap();
+        assert_eq!(
+            config::schema::YmConfig::resolve_var_strict("${project.version}", &root).unwrap(),
+            "2.5.0"
+        );
+        assert_eq!(config::schema::YmConfig::resolve_var_strict("33.4.0", &root).unwrap(), "33.4.0");
+        let err = config::schema::YmConfig::resolve_var_strict("${no.such.key}", &root).unwrap_err();
+        assert!(err.to_string().contains("unresolved placeholders"), "got: {}", err);
     }
 }

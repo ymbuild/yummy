@@ -442,6 +442,30 @@ impl YmConfig {
         result
     }
 
+    /// Strict variant of [`Self::resolve_var`] for publish paths: never
+    /// substitutes a guessed fallback. Errors when `${project.version}` is
+    /// referenced but `root` has no version (resolve_var would silently write
+    /// "0.0.0"), or when any `${...}` placeholder remains unresolved. A POM
+    /// published with a guessed version poisons the registry for every
+    /// downstream consumer, so publish must fail loudly instead.
+    pub fn resolve_var_strict(version: &str, root: &YmConfig) -> anyhow::Result<String> {
+        if version.contains("${project.version}") && root.version.is_none() {
+            anyhow::bail!(
+                "version expression '{}' references ${{project.version}} but the workspace root ym.json has no 'version' field",
+                version
+            );
+        }
+        let resolved = Self::resolve_var(version, root);
+        if resolved.contains("${") {
+            anyhow::bail!(
+                "version expression '{}' still contains unresolved placeholders after substitution: '{}'",
+                version,
+                resolved
+            );
+        }
+        Ok(resolved)
+    }
+
     /// Resolve `${env.VAR_NAME}` and `${VAR_NAME}` placeholders with environment variable values.
     /// Both syntaxes are supported; `${env.VAR}` is the legacy form, `${VAR}` is the short form.
     pub fn resolve_env_vars(s: &str) -> String {
